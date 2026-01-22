@@ -41,7 +41,8 @@ declare module '$env/static/private' {
 	export const ComSpec: string;
 	export const DriverData: string;
 	export const EDITOR: string;
-	export const EFC_23024_1592913036: string;
+	export const EFC_19472_1592913036: string;
+	export const EFC_19472_344590478: string;
 	export const GIT_ASKPASS: string;
 	export const HOME: string;
 	export const HOMEDRIVE: string;
@@ -83,6 +84,7 @@ declare module '$env/static/private' {
 	export const OS: string;
 	export const Path: string;
 	export const PATHEXT: string;
+	export const POWERSHELL_DISTRIBUTION_CHANNEL: string;
 	export const PROCESSOR_ARCHITECTURE: string;
 	export const PROCESSOR_IDENTIFIER: string;
 	export const PROCESSOR_LEVEL: string;
@@ -91,6 +93,7 @@ declare module '$env/static/private' {
 	export const ProgramFiles: string;
 	export const ProgramW6432: string;
 	export const PROMPT: string;
+	export const PSExecutionPolicyPreference: string;
 	export const PSModulePath: string;
 	export const PUBLIC: string;
 	export const SESSIONNAME: string;
@@ -162,7 +165,8 @@ declare module '$env/dynamic/private' {
 		ComSpec: string;
 		DriverData: string;
 		EDITOR: string;
-		EFC_23024_1592913036: string;
+		EFC_19472_1592913036: string;
+		EFC_19472_344590478: string;
 		GIT_ASKPASS: string;
 		HOME: string;
 		HOMEDRIVE: string;
@@ -204,6 +208,7 @@ declare module '$env/dynamic/private' {
 		OS: string;
 		Path: string;
 		PATHEXT: string;
+		POWERSHELL_DISTRIBUTION_CHANNEL: string;
 		PROCESSOR_ARCHITECTURE: string;
 		PROCESSOR_IDENTIFIER: string;
 		PROCESSOR_LEVEL: string;
@@ -212,6 +217,7 @@ declare module '$env/dynamic/private' {
 		ProgramFiles: string;
 		ProgramW6432: string;
 		PROMPT: string;
+		PSExecutionPolicyPreference: string;
 		PSModulePath: string;
 		PUBLIC: string;
 		SESSIONNAME: string;

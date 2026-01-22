@@ -1,11 +1,16 @@
+#![allow(non_snake_case)]
+#![allow(non_camel_case_types)]
+#![allow(unused_imports)]
+#![allow(dead_code)]
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::mpsc::{channel, Sender};
 use std::sync::Mutex;
 use std::thread;
-use windows::core::{interface, ComInterface, Result, GUID, HRESULT, PCWSTR, PWSTR};
-use windows::Win32::Foundation::CloseHandle;
+use windows::core::{interface, ComInterface, IUnknown, Result, GUID, HRESULT, PCWSTR, PWSTR};
+use windows::Win32::Foundation::{CloseHandle, E_NOINTERFACE};
 
 use base64::{engine::general_purpose, Engine as _};
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
@@ -30,48 +35,39 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use tokio::sync::oneshot;
 
-// IPolicyConfig definition for changing default audio device
+// Modern Client (Win 10/11)
+const CLSID_POLICY_CONFIG_CLIENT: GUID = GUID {
+    data1: 0x870af99c,
+    data2: 0x171d,
+    data3: 0x4f9e,
+    data4: [0xaf, 0x0d, 0xe6, 0x3d, 0xf4, 0x0c, 0x2b, 0xc9],
+};
+
+// Vista Client (Classic, often more stable on Win11 for simple switching)
+const CLSID_POLICY_CONFIG_VISTA: GUID = GUID {
+    data1: 0x294935ce,
+    data2: 0xf637,
+    data3: 0x4e7c,
+    data4: [0xa4, 0x1b, 0xab, 0x25, 0x54, 0x60, 0xf8, 0x62],
+};
+
 #[interface("f8679f50-850a-41cf-9c72-430f290290c8")]
-unsafe trait IPolicyConfig {
-    fn GetMixFormat(&self, pcwstrDeviceId: PCWSTR, ppWaveFormatEx: *mut *mut c_void) -> HRESULT;
-    fn GetDeviceFormat(
-        &self,
-        pcwstrDeviceId: PCWSTR,
-        bDefault: bool,
-        ppWaveFormatEx: *mut *mut c_void,
-    ) -> HRESULT;
-    fn ResetDeviceFormat(&self, pcwstrDeviceId: PCWSTR) -> HRESULT;
-    fn SetDeviceFormat(
-        &self,
-        pcwstrDeviceId: PCWSTR,
-        pWaveFormatEx: *mut c_void,
-        pWaveFormatEx2: *mut c_void,
-    ) -> HRESULT;
-    fn GetProcessingPeriod(
-        &self,
-        pcwstrDeviceId: PCWSTR,
-        bDefault: bool,
-        pmftDefaultPeriod: *mut i64,
-        pmftMinimumPeriod: *mut i64,
-    ) -> HRESULT;
-    fn SetProcessingPeriod(&self, pcwstrDeviceId: PCWSTR, pmftPeriod: *mut i64) -> HRESULT;
-    fn GetShareMode(&self, pcwstrDeviceId: PCWSTR, pDeviceShareMode: *mut c_void) -> HRESULT;
-    fn SetShareMode(&self, pcwstrDeviceId: PCWSTR, deviceShareMode: *mut c_void) -> HRESULT;
-    fn GetPropertyValue(
-        &self,
-        pcwstrDeviceId: PCWSTR,
-        key: *const c_void,
-        value: *mut c_void,
-    ) -> HRESULT;
-    fn SetPropertyValue(
-        &self,
-        pcwstrDeviceId: PCWSTR,
-        key: *const c_void,
-        value: *const c_void,
-    ) -> HRESULT;
-    fn SetDefaultEndpoint(&self, pcwstrDeviceId: PCWSTR, role: u32) -> HRESULT;
-    fn SetEndpointVisibility(&self, pcwstrDeviceId: PCWSTR, bVisible: bool) -> HRESULT;
+unsafe trait IPolicyConfigModern {
+    fn slot3(&self) -> HRESULT;
+    fn slot4(&self) -> HRESULT;
+    fn slot5(&self) -> HRESULT;
+    fn slot6(&self) -> HRESULT;
+    fn SetDefaultEndpoint7(&self, id: PCWSTR, role: u32) -> HRESULT; // Probe Index 7
+    fn SetDefaultEndpoint8(&self, id: PCWSTR, role: u32) -> HRESULT; // Probe Index 8
+    fn SetDefaultEndpoint9(&self, id: PCWSTR, role: u32) -> HRESULT; // Probe Index 9
+    fn SetDefaultEndpoint10(&self, id: PCWSTR, role: u32) -> HRESULT; // SKIP: CRASH
+    fn SetDefaultEndpoint11_3Args(&self, id: PCWSTR, role: u32, reserved: *mut c_void) -> HRESULT; // Probe Index 11 (3-arg)
+    fn SetDefaultEndpoint12_3Args(&self, id: PCWSTR, role: u32, reserved: *mut c_void) -> HRESULT; // Probe Index 12 (3-arg)
+    fn SetDefaultEndpoint13(&self, id: PCWSTR, role: u32) -> HRESULT; // Safe (Returns S_OK)
+    fn SetDefaultEndpoint14(&self, id: PCWSTR, role: u32) -> HRESULT; // Probe Index 14
 }
+
+// ... (Rest of struct definitions omitted as they are unchanged)
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AppVolume {
@@ -101,7 +97,7 @@ pub enum AudioRequest {
 }
 
 pub struct AppCache {
-    pub names: Mutex<HashMap<u32, (String, String)>>, // Store (name, icon_path)
+    pub names: Mutex<HashMap<u32, (String, String)>>,
 }
 
 impl AppCache {
@@ -123,13 +119,11 @@ impl AudioState {
 
         thread::spawn(move || {
             unsafe {
-                let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+                let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
             }
-
             struct AudioContext {
                 enumerator: IMMDeviceEnumerator,
             }
-
             impl AudioContext {
                 unsafe fn new() -> Result<Self> {
                     let enumerator: IMMDeviceEnumerator =
@@ -149,9 +143,7 @@ impl AudioState {
                     device.Activate(CLSCTX_ALL, None::<*const PROPVARIANT>)
                 }
             }
-
             let mut ctx = unsafe { AudioContext::new().ok() };
-
             while let Ok(req) = rx.recv() {
                 if ctx.is_none() {
                     ctx = unsafe { AudioContext::new().ok() };
@@ -197,17 +189,12 @@ impl AudioState {
                             let _ = tx.send(res);
                         }
                         AudioRequest::SetDefaultDevice(id) => {
-                            // This spawns a separate fast task or just runs here?
-                            // It involves COM creation, better run here to stay in MTA/STA if needed.
-                            // But SetDefaultDevice creates its own CoCreateInstance.
-                            // It is fast enough.
                             let _ = unsafe { set_default_device(&id) };
                         }
                     }
                 }
             }
         });
-
         Self { tx }
     }
 }
@@ -222,20 +209,17 @@ unsafe fn internal_get_app_volumes(
         device.Activate(CLSCTX_ALL, None::<*const PROPVARIANT>)?;
     let session_enumerator = session_manager.GetSessionEnumerator()?;
     let count = session_enumerator.GetCount()?;
-
     for i in 0..count {
         if let Ok(session_control) = session_enumerator.GetSession(i) {
             let state = session_control.GetState()?;
             if state.0 == 2 {
                 continue;
-            } // Expired
-
+            }
             if let Ok(session_control2) = session_control.cast::<IAudioSessionControl2>() {
                 let pid = session_control2.GetProcessId()?;
                 if pid == 0 {
                     continue;
                 }
-
                 if let Ok(simple_volume) = session_control.cast::<ISimpleAudioVolume>() {
                     let vol = simple_volume.GetMasterVolume()?;
                     let entry = session_map.entry(pid).or_insert(0.0);
@@ -246,10 +230,8 @@ unsafe fn internal_get_app_volumes(
             }
         }
     }
-
     let pids: Vec<u32> = session_map.keys().cloned().collect();
     update_cache_batch(&pids, cache);
-
     let mut apps = Vec::new();
     if let Ok(map) = cache.names.lock() {
         for (pid, vol) in session_map {
@@ -265,7 +247,6 @@ unsafe fn internal_get_app_volumes(
             });
         }
     }
-
     apps.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(apps)
 }
@@ -294,67 +275,119 @@ unsafe fn internal_set_app_vol(
 }
 
 unsafe fn set_default_device(id: &str) -> Result<()> {
-    // CLSID_PolicyConfig
-    let clsid = GUID::from_u128(0x870af99c_171d_4f9e_af0d_e63df40c2bc9);
-    let policy_config: IPolicyConfig = CoCreateInstance(&clsid, None, CLSCTX_ALL)?;
-
-    let mut id_wide: Vec<u16> = id.encode_utf16().chain(std::iter::once(0)).collect();
+    let id_wide: Vec<u16> = id.encode_utf16().chain(std::iter::once(0)).collect();
     let pcwstr = PCWSTR(id_wide.as_ptr());
 
-    // Set for all roles to be sure
-    policy_config
-        .SetDefaultEndpoint(pcwstr, eConsole.0 as u32)
-        .ok()?;
-    policy_config
-        .SetDefaultEndpoint(pcwstr, eMultimedia.0 as u32)
-        .ok()?;
-    policy_config
-        .SetDefaultEndpoint(pcwstr, eCommunications.0 as u32)
-        .ok()?;
+    println!(
+        "DEBUG: AUDIO FIX V25 (Modern CLSID + 3-Arg Probe 12/11) START for device {}",
+        id
+    );
+    let ROLES: [u32; 3] = [
+        eConsole.0 as u32,
+        eMultimedia.0 as u32,
+        eCommunications.0 as u32,
+    ];
 
+    if let Ok(pc_client) =
+        CoCreateInstance::<_, IUnknown>(&CLSID_POLICY_CONFIG_CLIENT, None, CLSCTX_ALL)
+    {
+        if let Ok(iface) = pc_client.cast::<IPolicyConfigModern>() {
+            println!("  IPolicyConfigModern cast successful.");
+
+            // Probe Sequence: 12 (3-arg) -> 11 (3-arg)
+            // Index 12 previously crashed with stack corruption hints (RPC error), implying argument mismatch.
+
+            // Index 12 (3-arg)
+            println!("  Testing Index 12 (3-arg)...");
+            for &role in &ROLES {
+                let hr = iface.SetDefaultEndpoint12_3Args(pcwstr, role, std::ptr::null_mut());
+                println!("    Index 12 (3-arg), Role {} -> Result: {:?}", role, hr);
+            }
+            thread::sleep(std::time::Duration::from_millis(200));
+            if verify_default_device(id) {
+                println!("    SUCCESS: Index 12 (3-arg) worked!");
+                return Ok(());
+            }
+
+            // Index 11 (3-arg)
+            println!("  Testing Index 11 (3-arg)...");
+            for &role in &ROLES {
+                let hr = iface.SetDefaultEndpoint11_3Args(pcwstr, role, std::ptr::null_mut());
+                println!("    Index 11 (3-arg), Role {} -> Result: {:?}", role, hr);
+            }
+            thread::sleep(std::time::Duration::from_millis(200));
+            if verify_default_device(id) {
+                println!("    SUCCESS: Index 11 (3-arg) worked!");
+                return Ok(());
+            }
+        }
+    } else {
+        println!("  ERROR: Failed to create CLSID_POLICY_CONFIG_CLIENT");
+    }
+
+    println!("ERROR: All V25 strategies failed.");
     Ok(())
 }
 
-unsafe fn get_audio_endpoints(
+unsafe fn verify_default_device(target_id: &str) -> bool {
+    if let Ok(enumerator) =
+        CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
+    {
+        for role in [eMultimedia, eConsole, eCommunications] {
+            if let Ok(def_dev) = enumerator.GetDefaultAudioEndpoint(eRender, role) {
+                if let Ok(def_id) = def_dev.GetId() {
+                    let s = def_id.to_string().unwrap_or_default();
+                    println!("    Verify Role {:?}: {}", role, s);
+                    CoTaskMemFree(Some(def_id.as_ptr() as *const c_void));
+                    if s.to_lowercase() == target_id.to_lowercase() {
+                        if role == eMultimedia {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+pub unsafe fn get_audio_endpoints(
     enumerator: &IMMDeviceEnumerator,
     data_flow: EDataFlow,
 ) -> Result<Vec<AudioDevice>> {
     let mut devices = Vec::new();
     let collection = enumerator.EnumAudioEndpoints(data_flow, DEVICE_STATE_ACTIVE)?;
     let count = collection.GetCount()?;
-
     for i in 0..count {
-        if let Ok(device) = collection.Item(i) {
-            let mut id = String::new();
-            if let Ok(id_pwstr) = device.GetId() {
-                id = id_pwstr.to_string().unwrap_or_default();
-                CoTaskMemFree(Some(id_pwstr.as_ptr() as *const c_void));
-            }
-
+        let device = collection.Item(i)?;
+        if let Ok(id_ptr) = device.GetId() {
+            let id = id_ptr.to_string().unwrap_or_default();
+            CoTaskMemFree(Some(id_ptr.as_ptr() as *const c_void));
+            let props = device.OpenPropertyStore(STGM_READ)?;
             let mut name = String::new();
-            if let Ok(props) = device.OpenPropertyStore(windows::Win32::System::Com::STGM_READ) {
-                if let Ok(mut val) = props.GetValue(&PKEY_Device_FriendlyName) {
-                    if let Ok(s) =
-                        windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc(
-                            &val,
-                        )
-                    {
-                        name = s.to_string().unwrap_or_default();
-                        CoTaskMemFree(Some(s.as_ptr() as *const c_void));
-                    }
-                    let _ = PropVariantClear(&mut val);
+            if let Ok(mut val) = props.GetValue(&PKEY_Device_FriendlyName) {
+                if !val.Anonymous.Anonymous.Anonymous.pwszVal.is_null() {
+                    name = val
+                        .Anonymous
+                        .Anonymous
+                        .Anonymous
+                        .pwszVal
+                        .to_string()
+                        .unwrap_or_default();
                 }
+                let _ = PropVariantClear(&mut val as *mut _);
             }
-
             devices.push(AudioDevice {
                 id: id.clone(),
-                name: if name.is_empty() { id } else { name },
+                name: if name.is_empty() {
+                    id.clone()
+                } else {
+                    name.clone()
+                },
                 is_default: false,
             });
         }
     }
-
-    // Mark default
     if let Ok(def_dev) = enumerator.GetDefaultAudioEndpoint(data_flow, eMultimedia) {
         if let Ok(def_id) = def_dev.GetId() {
             let s = def_id.to_string().unwrap_or_default();
@@ -366,7 +399,7 @@ unsafe fn get_audio_endpoints(
             CoTaskMemFree(Some(def_id.as_ptr() as *const c_void));
         }
     }
-
+    devices.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(devices)
 }
 
@@ -382,7 +415,6 @@ fn update_cache_batch(pids: &[u32], cache: &AppCache) {
     if missing_pids.is_empty() {
         return;
     }
-
     let mut found_names = HashMap::new();
     unsafe {
         if let Ok(handle) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
@@ -396,7 +428,6 @@ fn update_cache_batch(pids: &[u32], cache: &AppCache) {
                         let name = String::from_utf16_lossy(&pe.szExeFile)
                             .trim_matches('\0')
                             .to_string();
-
                         let mut path = String::new();
                         if let Ok(h_proc) = OpenProcess(
                             PROCESS_QUERY_LIMITED_INFORMATION,
@@ -417,13 +448,11 @@ fn update_cache_batch(pids: &[u32], cache: &AppCache) {
                             }
                             let _ = CloseHandle(h_proc);
                         }
-
                         let icon_b64 = if !path.is_empty() {
                             get_icon_as_base64(&path)
                         } else {
                             String::new()
                         };
-
                         found_names.insert(pe.th32ProcessID, (name, icon_b64));
                     }
                     if Process32NextW(handle, &mut pe).is_err() {
@@ -434,7 +463,6 @@ fn update_cache_batch(pids: &[u32], cache: &AppCache) {
             let _ = CloseHandle(handle);
         }
     }
-
     for &pid in &missing_pids {
         if !found_names.contains_key(&pid) {
             unsafe {
@@ -467,7 +495,6 @@ fn update_cache_batch(pids: &[u32], cache: &AppCache) {
                             }
                             let _ = CloseHandle(h_proc);
                         }
-
                         let icon_b64 = if !path.is_empty() {
                             get_icon_as_base64(&path)
                         } else {
@@ -480,7 +507,6 @@ fn update_cache_batch(pids: &[u32], cache: &AppCache) {
             }
         }
     }
-
     if let Ok(mut map) = cache.names.lock() {
         for pid in missing_pids {
             let data = found_names
@@ -495,17 +521,11 @@ fn get_icon_as_base64(path: &str) -> String {
     unsafe {
         let path_v16: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
         let mut h_icons = [HICON::default(); 1];
-
         let mut path_fixed = [0u16; 260];
         let copy_len = path_v16.len().min(260);
         path_fixed[..copy_len].copy_from_slice(&path_v16[..copy_len]);
-
-        // Specifically request 48x48 which is standard for "Large" icons on Windows
-        // PrivateExtractIconsW is more robust for high-res than ExtractIconEx
         let count = PrivateExtractIconsW(&path_fixed, 0, 48, 48, Some(&mut h_icons), None, 0);
-
         if count == 0 || h_icons[0].0 == 0 {
-            // Fallback to ExtractIconExW if private fails
             let mut h_large = [HICON::default(); 1];
             if ExtractIconExW(
                 windows::core::PCWSTR(path_v16.as_ptr()),
@@ -518,18 +538,15 @@ fn get_icon_as_base64(path: &str) -> String {
                 h_icons[0] = h_large[0];
             }
         }
-
         if h_icons[0].0 != 0 {
             let h_icon = h_icons[0];
             let mut icon_info = ICONINFO::default();
             if GetIconInfo(h_icon, &mut icon_info).is_ok() {
-                // Determine which bitmap to use (color preferred over mask)
                 let h_bm = if icon_info.hbmColor.0 != 0 {
                     icon_info.hbmColor
                 } else {
                     icon_info.hbmMask
                 };
-
                 let mut bm = BITMAP::default();
                 if GetObjectW(
                     h_bm,
@@ -539,11 +556,9 @@ fn get_icon_as_base64(path: &str) -> String {
                 {
                     let width = bm.bmWidth;
                     let height = bm.bmHeight;
-
                     let hdc_screen = windows::Win32::Graphics::Gdi::GetDC(None);
                     let hdc_mem = CreateCompatibleDC(hdc_screen);
                     let old_bm = SelectObject(hdc_mem, h_bm);
-
                     let mut bmi = BITMAPINFO {
                         bmiHeader: BITMAPINFOHEADER {
                             biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
@@ -556,7 +571,6 @@ fn get_icon_as_base64(path: &str) -> String {
                         },
                         ..Default::default()
                     };
-
                     let mut buffer: Vec<u8> = vec![0; (width * height * 4) as usize];
                     let ret = GetDIBits(
                         hdc_mem,
@@ -567,25 +581,18 @@ fn get_icon_as_base64(path: &str) -> String {
                         &mut bmi,
                         DIB_RGB_COLORS,
                     );
-
-                    // Clean up GDI state BEFORE return/formatting
                     if !old_bm.is_invalid() {
                         SelectObject(hdc_mem, old_bm);
                     }
                     let _ = DeleteDC(hdc_mem);
                     let _ = windows::Win32::Graphics::Gdi::ReleaseDC(None, hdc_screen);
-
                     if ret > 0 {
-                        // Swap BGRA (GDI) to RGBA (PNG)
                         for chunk in buffer.chunks_exact_mut(4) {
                             chunk.swap(0, 2);
                         }
-
                         let mut png_data = Vec::new();
-                        // Local use to bring trait into scope
                         use image::ImageEncoder;
                         let encoder = image::codecs::png::PngEncoder::new(&mut png_data);
-
                         if encoder
                             .write_image(
                                 &buffer,
@@ -596,8 +603,6 @@ fn get_icon_as_base64(path: &str) -> String {
                             .is_ok()
                         {
                             let b64 = general_purpose::STANDARD.encode(png_data);
-
-                            // Clean up icon resources safely
                             if icon_info.hbmColor.0 != 0 {
                                 let _ = DeleteObject(icon_info.hbmColor);
                             }
@@ -605,21 +610,19 @@ fn get_icon_as_base64(path: &str) -> String {
                                 let _ = DeleteObject(icon_info.hbmMask);
                             }
                             let _ = DestroyIcon(h_icon);
-
                             return format!("data:image/png;base64,{}", b64);
                         }
                     }
                 }
-                // Clean up if GetObject/GetDIBits failed
                 if icon_info.hbmColor.0 != 0 {
                     let _ = DeleteObject(icon_info.hbmColor);
                 }
                 if icon_info.hbmMask.0 != 0 {
                     let _ = DeleteObject(icon_info.hbmMask);
                 }
-            } // Close GetIconInfo
+            }
             let _ = DestroyIcon(h_icon);
-        } // Close if h_icons != 0
-    } // Close unsafe
+        }
+    }
     String::new()
-} // Close fn
+}

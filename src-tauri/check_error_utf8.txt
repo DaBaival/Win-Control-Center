@@ -1,0 +1,39 @@
+﻿    Checking win-control-center v0.1.0 (E:\MTool\Work\win-control-center\src-tauri)
+warning: type `IPolicyConfig_ImplVtbl` should have an upper camel case name
+  --> src\audio.rs:35:14
+   |
+35 | unsafe trait IPolicyConfig {
+   |              ^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `IpolicyConfigImplVtbl`
+   |
+   = note: `#[warn(non_camel_case_types)]` (part of `#[warn(nonstandard_style)]`) on by default
+System.Management.Automation.RemoteException
+warning: type `IPolicyConfigVista_ImplVtbl` should have an upper camel case name
+  --> src\audio.rs:77:14
+   |
+77 | unsafe trait IPolicyConfigVista {
+   |              ^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `IpolicyConfigVistaImplVtbl`
+System.Management.Automation.RemoteException
+warning: variable does not need to be mutable
+   --> src\audio.rs:346:9
+    |
+346 |     let mut id_wide: Vec<u16> = id.encode_utf16().chain(std::iter::once(0)).collect();
+    |         ----^^^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+System.Management.Automation.RemoteException
+error[E0596]: cannot borrow `val` as mutable, as it is not declared as mutable
+   --> src\audio.rs:440:42
+    |
+440 |                 let _ = PropVariantClear(&mut val as *mut _);
+    |                                          ^^^^^^^^ cannot borrow as mutable
+    |
+help: consider changing this to be mutable
+    |
+430 |             if let Ok(mut val) = props.GetValue(&PKEY_Device_FriendlyName) {
+    |                       +++
+System.Management.Automation.RemoteException
+For more information about this error, try `rustc --explain E0596`.
+warning: `win-control-center` (lib) generated 3 warnings
+error: could not compile `win-control-center` (lib) due to 1 previous error; 3 warnings emitted

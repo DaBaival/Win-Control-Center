@@ -1,0 +1,11 @@
+E:\MTool\Work\win-control-center\src-tauri\target_check\debug\deps\winreg-7bb4dd23f00c069f.d: C:\Users\YGHF\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\winreg-0.52.0\src\lib.rs C:\Users\YGHF\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\winreg-0.52.0\src\common.rs C:\Users\YGHF\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\winreg-0.52.0\src\enums.rs C:\Users\YGHF\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\winreg-0.52.0\src\reg_key.rs C:\Users\YGHF\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\winreg-0.52.0\src\reg_key_metadata.rs C:\Users\YGHF\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\winreg-0.52.0\src\reg_value.rs C:\Users\YGHF\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\winreg-0.52.0\src\types.rs
+
+E:\MTool\Work\win-control-center\src-tauri\target_check\debug\deps\libwinreg-7bb4dd23f00c069f.rmeta: C:\Users\YGHF\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\winreg-0.52.0\src\lib.rs C:\Users\YGHF\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\winreg-0.52.0\src\common.rs C:\Users\YGHF\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\winreg-0.52.0\src\enums.rs C:\Users\YGHF\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\winreg-0.52.0\src\reg_key.rs C:\Users\YGHF\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\winreg-0.52.0\src\reg_key_metadata.rs C:\Users\YGHF\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\winreg-0.52.0\src\reg_value.rs C:\Users\YGHF\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\winreg-0.52.0\src\types.rs
+
+C:\Users\YGHF\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\winreg-0.52.0\src\lib.rs:
+C:\Users\YGHF\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\winreg-0.52.0\src\common.rs:
+C:\Users\YGHF\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\winreg-0.52.0\src\enums.rs:
+C:\Users\YGHF\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\winreg-0.52.0\src\reg_key.rs:
+C:\Users\YGHF\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\winreg-0.52.0\src\reg_key_metadata.rs:
+C:\Users\YGHF\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\winreg-0.52.0\src\reg_value.rs:
+C:\Users\YGHF\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\winreg-0.52.0\src\types.rs:

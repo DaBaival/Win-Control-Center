@@ -23,7 +23,9 @@ pub struct AppState {
     pub is_visible: AtomicBool,
     pub last_blur: AtomicU64,
     pub last_show: AtomicU64,
+
     last_tray_state: Mutex<Option<LastTrayState>>,
+    tray: Mutex<Option<tauri::tray::TrayIcon>>,
 }
 
 // --- Async Setter Commands (Non-blocking) ---
@@ -172,17 +174,15 @@ pub fn run() {
                 last_blur: AtomicU64::new(0),
                 last_show: AtomicU64::new(0),
                 last_tray_state: Mutex::new(None),
+                tray: Mutex::new(None),
             });
-
-            // Initial tray menu update
-            update_tray_menu(app.handle());
 
             // Background tray menu updater loop
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    update_tray_menu(&handle);
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                    update_tray_menu(&handle).await;
                 }
             });
 
@@ -192,21 +192,38 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| {
                     let id_str = event.id().as_ref();
+                    println!("Tray menu click: {}", id_str);
                     if id_str == "quit" {
                         app.exit(0);
                     } else if id_str == "autostart" {
                         let current = get_autostart();
                         let _ = set_autostart(!current);
                     } else if let Some(dev_id) = id_str.strip_prefix("out:") {
+                        println!("Switching Playback to: {}", dev_id);
                         let state = app.state::<audio::AudioState>();
                         let _ = state
                             .tx
                             .send(audio::AudioRequest::SetDefaultDevice(dev_id.to_string()));
+
+                        // Trigger immediate update
+                        let h = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                            update_tray_menu(&h).await;
+                        });
                     } else if let Some(dev_id) = id_str.strip_prefix("in:") {
+                        println!("Switching Recording to: {}", dev_id);
                         let state = app.state::<audio::AudioState>();
                         let _ = state
                             .tx
                             .send(audio::AudioRequest::SetDefaultDevice(dev_id.to_string()));
+
+                        // Trigger immediate update
+                        let h = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                            update_tray_menu(&h).await;
+                        });
                     }
                 })
                 .on_tray_icon_event(|tray, event| {
@@ -284,6 +301,10 @@ pub fn run() {
                 })
                 .build(app)?;
 
+            if let Some(state) = app.try_state::<AppState>() {
+                *state.tray.lock().unwrap() = Some(_tray);
+            }
+
             if let Some(window) = app.get_webview_window("main") {
                 let w = window.clone();
                 let app_handle = app.handle().clone();
@@ -306,6 +327,12 @@ pub fn run() {
                 });
             }
 
+            // Initial tray menu update
+            let h2 = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                update_tray_menu(&h2).await;
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -325,23 +352,19 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
-fn update_tray_menu(app_handle: &tauri::AppHandle) {
-    let (out_devs, in_devs) = tauri::async_runtime::block_on(async {
-        let audio_state = app_handle.state::<audio::AudioState>();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let _ = audio_state
-            .tx
-            .send(audio::AudioRequest::GetPlaybackDevices(tx));
-        let out_devs = rx.await.ok().and_then(|r| r.ok()).unwrap_or_default();
+async fn update_tray_menu(app_handle: &tauri::AppHandle) {
+    let audio_state = app_handle.state::<audio::AudioState>();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let _ = audio_state
+        .tx
+        .send(audio::AudioRequest::GetPlaybackDevices(tx));
+    let out_devs = rx.await.ok().and_then(|r| r.ok()).unwrap_or_default();
 
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let _ = audio_state
-            .tx
-            .send(audio::AudioRequest::GetCaptureDevices(tx));
-        let in_devs = rx.await.ok().and_then(|r| r.ok()).unwrap_or_default();
-
-        (out_devs, in_devs)
-    });
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let _ = audio_state
+        .tx
+        .send(audio::AudioRequest::GetCaptureDevices(tx));
+    let in_devs = rx.await.ok().and_then(|r| r.ok()).unwrap_or_default();
 
     let is_auto = get_autostart();
 
@@ -356,13 +379,14 @@ fn update_tray_menu(app_handle: &tauri::AppHandle) {
         let mut last = app_state.last_tray_state.lock().unwrap();
         if let Some(old) = &*last {
             if old == &new_state {
-                return; // No change
+                // Return if nothing changed to avoid closing the open context menu
+                return;
             }
         }
         *last = Some(new_state);
     }
 
-    let out_menu = Submenu::new(app_handle, "Sound Output", true).unwrap();
+    let out_menu = Submenu::new(app_handle, "播放设备", true).unwrap();
     for d in out_devs {
         let _ = out_menu.append(
             &CheckMenuItem::with_id(
@@ -377,7 +401,7 @@ fn update_tray_menu(app_handle: &tauri::AppHandle) {
         );
     }
 
-    let in_menu = Submenu::new(app_handle, "Sound Input", true).unwrap();
+    let in_menu = Submenu::new(app_handle, "录音设备", true).unwrap();
     for d in in_devs {
         let _ = in_menu.append(
             &CheckMenuItem::with_id(
@@ -395,14 +419,14 @@ fn update_tray_menu(app_handle: &tauri::AppHandle) {
     let auto_item = CheckMenuItem::with_id(
         app_handle,
         "autostart",
-        "Start on Boot",
+        "开机自启",
         true,
         is_auto,
         None::<&str>,
     )
     .unwrap();
 
-    let quit_item = MenuItem::with_id(app_handle, "quit", "Exit", true, None::<&str>).unwrap();
+    let quit_item = MenuItem::with_id(app_handle, "quit", "退出", true, None::<&str>).unwrap();
 
     let menu =
         Menu::with_items(app_handle, &[&out_menu, &in_menu, &auto_item, &quit_item]).unwrap();
