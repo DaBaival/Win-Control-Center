@@ -933,6 +933,10 @@ function attributes(attrs, css_hash, classes, styles, flags = 0) {
 function stringify(value) {
   return typeof value === "string" ? value : value == null ? "" : value + "";
 }
+function attr_class(value, hash, directives) {
+  var result = to_class(value, hash, directives);
+  return result ? ` class="${escape_html(result, true)}"` : "";
+}
 function attr_style(value, directives) {
   var result = to_style(value, directives);
   return result ? ` style="${escape_html(result, true)}"` : "";
@@ -949,6 +953,7 @@ export {
   COMMENT_NODE as C,
   DIRTY as D,
   ERROR_VALUE as E,
+  attr_style as F,
   HYDRATION_ERROR as H,
   INERT as I,
   LEGACY_PROPS as L,
@@ -981,6 +986,6 @@ export {
   render as v,
   attr as w,
   ensure_array_like as x,
-  attr_style as y,
+  attr_class as y,
   stringify as z
 };

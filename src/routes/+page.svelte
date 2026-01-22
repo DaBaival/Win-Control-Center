@@ -497,6 +497,7 @@
     flex-direction: column;
     gap: 12px;
     padding: 12px; /* Standard Windows margin */
+    width: 360px; /* Force consistent width */
     height: auto;
     box-sizing: border-box;
     overflow: hidden;

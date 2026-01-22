@@ -170,6 +170,12 @@ fn update_tray_icon_for_theme(app: &tauri::AppHandle, theme: Theme) {
         _ => "icons/icon_white.png",
     };
 
+    // Debug print to console if possible
+    println!(
+        "System Theme changed to: {:?}, loading: {}",
+        theme, icon_path
+    );
+
     if let Ok(icon) = Image::from_path(
         app.path()
             .resolve(icon_path, BaseDirectory::Resource)
@@ -210,12 +216,14 @@ pub fn run() {
                 }
             });
 
-            // No initial menu needed, we build on click
             // Setup tray
-            let theme = app
-                .get_webview_window("main")
-                .and_then(|w| w.theme().ok())
-                .unwrap_or(Theme::Dark);
+            let window = app.get_webview_window("main").unwrap();
+
+            // Force decorations off and other flags for production builds
+            let _ = window.set_decorations(false);
+            let _ = window.set_shadow(true);
+
+            let theme = window.theme().ok().unwrap_or(Theme::Dark);
             let icon_path = match theme {
                 Theme::Light => "icons/icon_black.png",
                 _ => "icons/icon_white.png",
