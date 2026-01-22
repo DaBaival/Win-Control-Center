@@ -173,27 +173,38 @@ fn set_mouse_speed(val: u32) {
 #[tauri::command]
 async fn resize_window(app: tauri::AppHandle, height: f64) {
     let state = app.state::<AppState>();
-    *state.height_cache.lock().unwrap() = height;
+    let mut cache = state.height_cache.lock().unwrap();
+    let old_cache = *cache;
+    *cache = height;
 
     if let Some(window) = app.get_webview_window("main") {
         let is_visible = window.is_visible().unwrap_or(false);
         if is_visible {
-            let old_size = window.outer_size().unwrap_or_default();
-            let scale_factor = window.scale_factor().unwrap_or(1.0);
-            let new_height_phys = (height * scale_factor) as i32;
-            let pos = window.outer_position().unwrap_or_default();
+            // Only reposition if change is significant (> 2px) to avoid micro-jitters
+            if (height - old_cache).abs() > 2.0 {
+                let old_size = window.outer_size().unwrap_or_default();
+                let scale_factor = window.scale_factor().unwrap_or(1.0);
+                let new_height_phys = (height * scale_factor) as i32;
+                let pos = window.outer_position().unwrap_or_default();
 
-            let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
-                width: 360.0,
-                height,
-            }));
+                let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
+                    width: 360.0,
+                    height,
+                }));
 
-            // Adjust Y to keep bottom fixed
-            let diff = new_height_phys - old_size.height as i32;
-            let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
-                x: pos.x,
-                y: pos.y - diff,
-            }));
+                // Adjust Y to keep bottom fixed
+                let diff = new_height_phys - old_size.height as i32;
+                let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
+                    x: pos.x,
+                    y: pos.y - diff,
+                }));
+            } else {
+                // Near-zero change, just ensure size is synced without heavy movement
+                let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
+                    width: 360.0,
+                    height,
+                }));
+            }
         } else {
             let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
                 width: 360.0,

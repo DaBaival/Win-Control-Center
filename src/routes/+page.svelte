@@ -237,9 +237,7 @@
   onMount(() => {
     loadState();
     interval = setInterval(() => {
-      if (document.visibilityState === "visible") {
-        loadState();
-      }
+      loadState();
     }, 2500);
 
     const handleGlobalUp = () => {
