@@ -19,6 +19,9 @@ fn is_light_mode_registry() -> bool {
     if let Ok(key) =
         hkcu.open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize")
     {
+        if let Ok(val) = key.get_value::<u32, _>("SystemUsesLightTheme") {
+            return val == 1;
+        }
         if let Ok(val) = key.get_value::<u32, _>("AppsUseLightTheme") {
             return val == 1;
         }
@@ -334,6 +337,13 @@ pub fn run() {
                                         return;
                                     }
                                     state.last_show.store(now, Ordering::SeqCst);
+
+                                    // Ensure size is correct BEFORE showing and calculation
+                                    let _ =
+                                        window.set_size(tauri::Size::Logical(tauri::LogicalSize {
+                                            width: 360.0,
+                                            height: 400.0,
+                                        }));
 
                                     let scale_factor = window.scale_factor().unwrap_or(1.0);
                                     let (tx, ty) = match rect.position {
