@@ -358,14 +358,12 @@ pub fn run() {
                                         tauri::Size::Logical(l) => (l.width * scale_factor) as u32,
                                     };
 
-                                    let win_size =
-                                        window.outer_size().unwrap_or(tauri::PhysicalSize {
-                                            width: (360.0 * scale_factor) as u32,
-                                            height: (400.0 * scale_factor) as u32,
-                                        });
+                                    // DPI-aware physical size calculation
+                                    let target_width_phys = (360.0 * scale_factor) as i32;
+                                    let target_height_phys = (400.0 * scale_factor) as i32;
 
-                                    let x = tx + (tw as i32 / 2) - (win_size.width as i32 / 2);
-                                    let y = ty - win_size.height as i32 - 10;
+                                    let x = tx + (tw as i32 / 2) - (target_width_phys / 2);
+                                    let y = ty - target_height_phys - 10;
 
                                     let _ = window.set_position(tauri::Position::Physical(
                                         tauri::PhysicalPosition { x, y },
