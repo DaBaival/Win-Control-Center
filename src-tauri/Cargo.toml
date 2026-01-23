@@ -49,5 +49,7 @@ tokio = { version = "1", features = ["sync", "rt-multi-thread", "time"] }
 base64 = "0.22.1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 winreg = "0.52"
+window-vibrancy = "0.5"
+
 
 

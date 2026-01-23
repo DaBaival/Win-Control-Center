@@ -68,11 +68,13 @@ pub struct AudioDevice {
 }
 
 pub enum AudioRequest {
-    GetMasterVolume(oneshot::Sender<Result<f32>>),
-    GetMicVolume(oneshot::Sender<Result<f32>>),
+    GetMasterVolume(oneshot::Sender<Result<(f32, bool)>>),
+    GetMicVolume(oneshot::Sender<Result<(f32, bool)>>),
     GetAppVolumes(oneshot::Sender<Result<Vec<AppVolume>>>),
     SetMasterVolume(f32),
     SetMicVolume(f32),
+    SetMasterMute(bool),
+    SetMicMute(bool),
     SetAppVolume(u32, f32),
     SetAppMute(u32, bool),
     GetPlaybackDevices(oneshot::Sender<Result<Vec<AudioDevice>>>),
@@ -135,13 +137,23 @@ impl AudioState {
                 if let Some(ref mut c) = ctx {
                     match req {
                         AudioRequest::GetMasterVolume(res_tx) => {
-                            let res =
-                                unsafe { c.get_sys().and_then(|v| v.GetMasterVolumeLevelScalar()) };
+                            let res = unsafe {
+                                c.get_sys().and_then(|v| {
+                                    let vol = v.GetMasterVolumeLevelScalar()?;
+                                    let mute = v.GetMute()?.as_bool();
+                                    Ok((vol, mute))
+                                })
+                            };
                             let _ = res_tx.send(res);
                         }
                         AudioRequest::GetMicVolume(res_tx) => {
-                            let res =
-                                unsafe { c.get_mic().and_then(|v| v.GetMasterVolumeLevelScalar()) };
+                            let res = unsafe {
+                                c.get_mic().and_then(|v| {
+                                    let vol = v.GetMasterVolumeLevelScalar()?;
+                                    let mute = v.GetMute()?.as_bool();
+                                    Ok((vol, mute))
+                                })
+                            };
                             let _ = res_tx.send(res);
                         }
                         AudioRequest::GetAppVolumes(res_tx) => {
@@ -151,14 +163,26 @@ impl AudioState {
                         }
                         AudioRequest::SetMasterVolume(vol) => {
                             if let Ok(v) = unsafe { c.get_sys() } {
+                                let _ = unsafe { v.SetMute(false, std::ptr::null()) };
                                 let _ =
                                     unsafe { v.SetMasterVolumeLevelScalar(vol, std::ptr::null()) };
                             }
                         }
                         AudioRequest::SetMicVolume(vol) => {
                             if let Ok(v) = unsafe { c.get_mic() } {
+                                let _ = unsafe { v.SetMute(false, std::ptr::null()) };
                                 let _ =
                                     unsafe { v.SetMasterVolumeLevelScalar(vol, std::ptr::null()) };
+                            }
+                        }
+                        AudioRequest::SetMasterMute(mute) => {
+                            if let Ok(v) = unsafe { c.get_sys() } {
+                                let _ = unsafe { v.SetMute(mute, std::ptr::null()) };
+                            }
+                        }
+                        AudioRequest::SetMicMute(mute) => {
+                            if let Ok(v) = unsafe { c.get_mic() } {
+                                let _ = unsafe { v.SetMute(mute, std::ptr::null()) };
                             }
                         }
                         AudioRequest::SetAppVolume(pid, vol) => {

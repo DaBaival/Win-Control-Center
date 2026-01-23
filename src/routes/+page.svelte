@@ -6,7 +6,9 @@
   // import AppRow from "$lib/components/AppRow.svelte";
 
   let sysVol = 0;
+  let sysMuted = false;
   let micVol = 0;
+  let micMuted = false;
   let brightness = 100;
   let mouseSpeed = 10;
 
@@ -167,6 +169,26 @@
     lastInteraction = Date.now();
   }
 
+  async function toggleSysMute() {
+    lastInteraction = Date.now();
+    sysMuted = !sysMuted;
+    try {
+      await invoke("set_system_mute", { mute: sysMuted });
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  async function toggleMicMute() {
+    lastInteraction = Date.now();
+    micMuted = !micMuted;
+    try {
+      await invoke("set_mic_mute", { mute: micMuted });
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
   async function loadState() {
     if (pollingLock) return;
     // Don't poll for 3 seconds after any interaction to give OS time to settle and prevent flicker
@@ -188,16 +210,20 @@
       const [resSys, resMic, resBri, resSpd, resApps] = results;
 
       if (resSys.status === "fulfilled") {
-        const v = resSys.value * 100;
-        if (!initialLoaded || Math.abs(v - sysVol) > 1) {
-          sysVol = v;
+        const [v, m] = resSys.value;
+        const vol = v * 100;
+        if (!initialLoaded || Math.abs(vol - sysVol) > 1 || sysMuted !== m) {
+          sysVol = vol;
+          sysMuted = m;
         }
       }
 
       if (resMic.status === "fulfilled") {
-        const v = resMic.value * 100;
-        if (!initialLoaded || Math.abs(v - micVol) > 1) {
-          micVol = v;
+        const [v, m] = resMic.value;
+        const vol = v * 100;
+        if (!initialLoaded || Math.abs(vol - micVol) > 1 || micMuted !== m) {
+          micVol = vol;
+          micMuted = m;
         }
       }
 
@@ -258,7 +284,12 @@
 <main>
   <section class="merged-controls">
     <div class="control-row">
-      <div class="icon-box" title="System Volume">
+      <div
+        class="icon-box {sysMuted ? 'muted' : ''}"
+        title="System Volume"
+        onclick={toggleSysMute}
+        style="cursor: pointer;"
+      >
         <svg
           xmlns="http://www.w3.org/2000/svg"
           width="20"
@@ -269,10 +300,20 @@
           stroke-width="2"
           stroke-linecap="round"
           stroke-linejoin="round"
-          ><path d="M11 5L6 9H2v6h4l5 4V5z" /><path
-            d="M15.54 8.46a5 5 0 0 1 0 7.07"
-          /><path d="M19.07 4.93a10 10 0 0 1 0 14.14" /></svg
-        >
+          ><path d="M11 5L6 9H2v6h4l5 4V5z" />
+          {#if !sysMuted}
+            <path d="M15.54 8.46a5 5 0 0 1 0 7.07" /><path
+              d="M19.07 4.93a10 10 0 0 1 0 14.14"
+            />
+          {:else}
+            <line x1="23" y1="9" x2="17" y2="15" /><line
+              x1="17"
+              y1="9"
+              x2="23"
+              y2="15"
+            />
+          {/if}
+        </svg>
       </div>
       <div class="slider-container">
         <input
@@ -289,7 +330,12 @@
     </div>
 
     <div class="control-row">
-      <div class="icon-box" title="Microphone">
+      <div
+        class="icon-box {micMuted ? 'muted' : ''}"
+        title="Microphone"
+        onclick={toggleMicMute}
+        style="cursor: pointer;"
+      >
         <svg
           xmlns="http://www.w3.org/2000/svg"
           width="20"
@@ -307,8 +353,11 @@
             y1="19"
             x2="12"
             y2="22"
-          /><line x1="8" y1="22" x2="16" y2="22" /></svg
-        >
+          /><line x1="8" y1="22" x2="16" y2="22" />
+          {#if micMuted}
+            <line x1="1" y1="1" x2="23" y2="23" />
+          {/if}
+        </svg>
       </div>
       <div class="slider-container">
         <input
@@ -466,6 +515,7 @@
 </main>
 
 <style>
+  :global(html),
   :global(body) {
     font-family: "Segoe UI", system-ui, sans-serif;
     background: transparent !important;
@@ -486,28 +536,26 @@
     display: flex;
     flex-direction: column;
     gap: 12px;
-    padding: 12px; /* Standard Windows margin */
-    width: 100%; /* Fill the window width */
-    max-width: 360px; /* Cap it for larger windows but stay centered if needed */
-    margin: 0 auto;
+    padding: 12px;
+    width: 100%;
     height: auto;
     box-sizing: border-box;
     overflow: hidden;
     position: relative;
 
-    /* Light mode: More transparent, glassier background */
-    background: rgba(243, 243, 243, 0.75);
-    backdrop-filter: blur(25px) saturate(180%);
-    -webkit-backdrop-filter: blur(25px) saturate(180%);
+    /* Base logic: Transparent background, let OS Acrylic show through */
+    background: transparent !important;
 
-    border-radius: 8px; /* Sharper Win11 corners for menus */
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12);
+    /* VISUAL FIX: Enforce rounded corners on the definition of content area */
+    border-radius: 12px !important;
     border: 1px solid rgba(255, 255, 255, 0.4);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
   }
 
   @media (prefers-color-scheme: dark) {
     main {
-      background: rgba(28, 28, 28, 0.8);
+      /* background: rgba(28, 28, 28, 0.8); */
+      background: transparent !important;
       border: 1px solid rgba(255, 255, 255, 0.08);
       box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
     }
@@ -549,6 +597,18 @@
   }
 
   @media (prefers-color-scheme: dark) {
+    /* Global structural styles */
+    :global(html),
+    :global(body) {
+      background-color: transparent !important;
+      margin: 0;
+      padding: 0;
+      overflow: hidden; /* Prevent scrollbars */
+      width: 100%;
+      height: 100%;
+    }
+
+    /* Control Row Hover Effect */
     .control-row:hover {
       background: rgba(255, 255, 255, 0.05);
     }

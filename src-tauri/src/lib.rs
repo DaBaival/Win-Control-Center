@@ -5,13 +5,19 @@ mod input;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tauri::window::Color;
 use tauri::{
     image::Image,
     menu::{CheckMenuItem, Menu, MenuItem, Submenu},
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
-    Manager, Theme,
+    Manager, Theme, WebviewWindow,
 };
+#[cfg(target_os = "windows")]
+use window_vibrancy::{apply_acrylic, apply_blur, apply_mica};
 use winreg::{enums::*, RegKey};
+
+#[cfg(not(target_os = "windows"))]
+fn apply_window_effect(_window: &WebviewWindow) {}
 
 // Embed icons at compile time for true portability
 const ICON_WHITE_BYTES: &[u8] = include_bytes!("../icons/icon_white.png");
@@ -71,10 +77,22 @@ fn set_app_mute(state: tauri::State<audio::AudioState>, pid: u32, mute: bool) {
     let _ = state.tx.send(audio::AudioRequest::SetAppMute(pid, mute));
 }
 
+#[tauri::command]
+fn set_system_mute(state: tauri::State<audio::AudioState>, mute: bool) {
+    let _ = state.tx.send(audio::AudioRequest::SetMasterMute(mute));
+}
+
+#[tauri::command]
+fn set_mic_mute(state: tauri::State<audio::AudioState>, mute: bool) {
+    let _ = state.tx.send(audio::AudioRequest::SetMicMute(mute));
+}
+
 // --- Getter Commands (Using Request/Response) ---
 
 #[tauri::command]
-async fn get_system_volume(state: tauri::State<'_, audio::AudioState>) -> Result<f32, String> {
+async fn get_system_volume(
+    state: tauri::State<'_, audio::AudioState>,
+) -> Result<(f32, bool), String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     state
         .tx
@@ -86,7 +104,7 @@ async fn get_system_volume(state: tauri::State<'_, audio::AudioState>) -> Result
 }
 
 #[tauri::command]
-async fn get_mic_volume(state: tauri::State<'_, audio::AudioState>) -> Result<f32, String> {
+async fn get_mic_volume(state: tauri::State<'_, audio::AudioState>) -> Result<(f32, bool), String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     state
         .tx
@@ -109,6 +127,53 @@ async fn get_app_volumes(
     rx.await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn reapply_effects(window: tauri::WebviewWindow) {
+    #[cfg(target_os = "windows")]
+    {
+        println!("Manually re-applying effects with DWM Kick...");
+
+        // 1. Force Resize (Kick DWM composition)
+        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
+            width: 361.0,
+            height: 400.0,
+        }));
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
+            width: 360.0,
+            height: 400.0,
+        }));
+
+        // 2. Toggle Shadow (Reset border rendering)
+        let _ = window.set_shadow(false);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let _ = window.set_shadow(true);
+
+        // 3. Apply Effect (Acrylic)
+        // Note: apply_window_effect takes &WebviewWindow.
+        apply_window_effect(&window);
+
+        // 4. Clear Background (CRITICAL: Must happen after Acrylic)
+        let _ = window.set_background_color(Some(Color(0, 0, 0, 0)));
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn apply_window_effect(window: &WebviewWindow) {
+    println!("Applying transparency effect (Blur)...");
+    // Use Blur (Standard) - restoring "Yesterday's" configuration
+    if let Err(e) = apply_blur(window, Some((0, 0, 0, 0))) {
+        println!("Blur failed: {:?}. Retrying Acrylic...", e);
+        if let Err(e2) = apply_acrylic(window, Some((0, 0, 0, 10))) {
+            println!("Acrylic also failed: {:?}", e2);
+        } else {
+            println!("Acrylic applied.");
+        }
+    } else {
+        println!("Blur applied.");
+    }
 }
 
 // --- Brightness with Smart Cache & De-duplication ---
@@ -185,10 +250,10 @@ async fn resize_window(app: tauri::AppHandle, height: f64) {
         if is_visible {
             // Only reposition if change is significant (> 2px) to avoid micro-jitters
             if (height - old_cache).abs() > 2.0 {
-                let old_size = window.outer_size().unwrap_or_default();
+                let _old_size = window.outer_size().unwrap_or_default();
                 let scale_factor = window.scale_factor().unwrap_or(1.0);
-                let new_height_phys = (height * scale_factor) as i32;
-                let pos = window.outer_position().unwrap_or_default();
+                let _new_height_phys = (height * scale_factor) as i32;
+                let _pos = window.outer_position().unwrap_or_default();
 
                 let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
                     width: 360.0,
@@ -196,23 +261,23 @@ async fn resize_window(app: tauri::AppHandle, height: f64) {
                 }));
 
                 // Adjust Y to keep bottom fixed
-                let diff = new_height_phys - old_size.height as i32;
-                let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
-                    x: pos.x,
-                    y: pos.y - diff,
-                }));
+                // let diff = new_height_phys - old_size.height as i32;
+                // let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
+                //     x: pos.x,
+                //     y: pos.y - diff,
+                // }));
             } else {
                 // Near-zero change, just ensure size is synced without heavy movement
-                let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
-                    width: 360.0,
-                    height,
-                }));
+                // let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
+                //     width: 360.0,
+                //     height,
+                // }));
             }
         } else {
-            let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
-                width: 360.0,
-                height,
-            }));
+            // let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
+            //     width: 360.0,
+            //     height,
+            // }));
         }
     }
 }
@@ -268,10 +333,30 @@ pub fn run() {
             // Setup tray
             let window = app.get_webview_window("main").unwrap();
 
-            // Force decorations off and other flags for production builds
             let _ = window.set_decorations(false);
-            let _ = window.set_shadow(true);
+            let _ = window.set_shadow(true); // RESTORE SHADOW: Required for rounded corners
             let _ = window.set_title("");
+
+            // CRITICAL: Explicitly clear background color to ensure transparency
+            let _ = window.set_background_color(Some(Color(0, 0, 0, 0)));
+
+            #[cfg(target_os = "windows")]
+            {
+                let w = window.clone();
+                tauri::async_runtime::spawn(async move {
+                    // Final Attempt: Direct Startup Acrylic
+                    // Using Acrylic (Glass) + Pure Transparent Background matches the "Visible: True" config
+
+                    // Initial apply
+                    apply_window_effect(&w);
+
+                    // Delayed fix
+                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                    apply_window_effect(&w);
+                    let _ = w.set_background_color(Some(Color(0, 0, 0, 0)));
+                    println!("VIBRANCY APPLIED: Acrylic + Clean");
+                });
+            }
 
             // Initial theme from registry (more reliable than window.theme() at start)
             let theme = if is_light_mode_registry() {
@@ -400,8 +485,13 @@ pub fn run() {
                                     let _ = window.set_position(tauri::Position::Physical(
                                         tauri::PhysicalPosition { x, y },
                                     ));
+
                                     let _ = window.show();
                                     let _ = window.set_focus();
+
+                                    // Re-apply effect AFTER showing (critical for some Windows versions)
+                                    // CRITICAL: Force clear background again on show to prevent white flash
+                                    apply_window_effect(&window);
                                 }
                             }
                         }
@@ -453,6 +543,8 @@ pub fn run() {
             set_system_volume,
             get_mic_volume,
             set_mic_volume,
+            set_system_mute,
+            set_mic_mute,
             get_app_volumes,
             set_app_volume,
             set_app_mute,

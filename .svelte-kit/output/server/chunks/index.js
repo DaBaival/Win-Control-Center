@@ -984,8 +984,8 @@ export {
   REACTION_IS_UPDATING as t,
   is_passive_event as u,
   render as v,
-  attr as w,
-  ensure_array_like as x,
-  attr_class as y,
+  attr_class as w,
+  attr as x,
+  ensure_array_like as y,
   stringify as z
 };
