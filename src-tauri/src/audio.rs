@@ -217,7 +217,11 @@ unsafe fn internal_get_app_volumes(
     enumerator: &IMMDeviceEnumerator,
     cache: &AppCache,
 ) -> Result<Vec<AppVolume>> {
-    let mut session_map: HashMap<u32, (f32, bool)> = HashMap::new();
+    // Windows may keep stale Inactive (state=0) sessions per PID with the default 1.0 volume,
+    // which would mask the real Active (state=1) session's user-set volume.
+    // Collect them separately and prefer Active per PID; fall back to Inactive only if no Active exists.
+    let mut active_map: HashMap<u32, (f32, bool)> = HashMap::new();
+    let mut inactive_map: HashMap<u32, (f32, bool)> = HashMap::new();
     let device = enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia)?;
     let session_manager: IAudioSessionManager2 =
         device.Activate(CLSCTX_ALL, None::<*const PROPVARIANT>)?;
@@ -237,14 +241,26 @@ unsafe fn internal_get_app_volumes(
                 if let Ok(simple_volume) = session_control.cast::<ISimpleAudioVolume>() {
                     let vol = simple_volume.GetMasterVolume()?;
                     let mute = simple_volume.GetMute()?.as_bool();
-                    let entry = session_map.entry(pid).or_insert((0.0, false));
-                    if vol > entry.0 {
-                        entry.0 = vol;
-                        entry.1 = mute;
-                    }
+                    let target_map = if state.0 == 1 {
+                        &mut active_map
+                    } else {
+                        &mut inactive_map
+                    };
+                    target_map
+                        .entry(pid)
+                        .and_modify(|e| {
+                            if vol > e.0 {
+                                *e = (vol, mute);
+                            }
+                        })
+                        .or_insert((vol, mute));
                 }
             }
         }
+    }
+    let mut session_map = active_map;
+    for (pid, val) in inactive_map {
+        session_map.entry(pid).or_insert(val);
     }
     let pids: Vec<u32> = session_map.keys().cloned().collect();
     update_cache_batch(&pids, cache);

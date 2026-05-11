@@ -481,6 +481,7 @@ pub fn run() {
 
             let _tray = TrayIconBuilder::with_id("main")
                 .icon(initial_icon)
+                .tooltip("Win Control Center")
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| {
                     let id_str = event.id().as_ref();
