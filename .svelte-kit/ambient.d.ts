@@ -91,6 +91,7 @@ declare module '$env/static/private' {
 	export const NPM_PREFIX_JS: string;
 	export const NPM_PREFIX_NPM_CLI_JS: string;
 	export const NUMBER_OF_PROCESSORS: string;
+	export const OLDPWD: string;
 	export const OneDrive: string;
 	export const OneDriveConsumer: string;
 	export const OS: string;
@@ -223,6 +224,7 @@ declare module '$env/dynamic/private' {
 		NPM_PREFIX_JS: string;
 		NPM_PREFIX_NPM_CLI_JS: string;
 		NUMBER_OF_PROCESSORS: string;
+		OLDPWD: string;
 		OneDrive: string;
 		OneDriveConsumer: string;
 		OS: string;

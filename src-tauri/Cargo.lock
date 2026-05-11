@@ -4714,7 +4714,7 @@ dependencies = [
 
 [[package]]
 name = "win-control-center"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "base64 0.22.1",
  "brightness",

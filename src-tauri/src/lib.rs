@@ -424,7 +424,7 @@ pub fn run() {
                 last_blur: AtomicU64::new(0),
                 last_show: AtomicU64::new(0),
                 height_cache: Mutex::new(400.0),
-                blur_style: Mutex::new(BlurStyle::MicaAlt), // Default to Mica Alt
+                blur_style: Mutex::new(get_saved_blur_style()),
                 last_tray_state: Mutex::new(None),
                 tray: Mutex::new(None),
             });
@@ -515,6 +515,7 @@ pub fn run() {
                             let state = app.state::<AppState>();
                             *state.blur_style.lock().unwrap() = new_style;
                         }
+                        set_saved_blur_style(new_style);
                         println!("Switched Blur Style to: {:?}", new_style);
 
                         // Re-apply immediate
@@ -849,4 +850,35 @@ fn set_autostart(enable: bool) -> Result<(), String> {
         let _ = run.delete_value(app_name);
     }
     Ok(())
+}
+
+fn get_saved_blur_style() -> BlurStyle {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    if let Ok(key) = hkcu.open_subkey("Software\\WinControlCenter") {
+        if let Ok(val) = key.get_value::<String, _>("BlurStyle") {
+            return match val.as_str() {
+                "mica" => BlurStyle::Mica,
+                "mica_alt" => BlurStyle::MicaAlt,
+                "acrylic" => BlurStyle::Acrylic,
+                "blur" => BlurStyle::Blur,
+                _ => BlurStyle::MicaAlt,
+            };
+        }
+    }
+    BlurStyle::MicaAlt
+}
+
+fn set_saved_blur_style(style: BlurStyle) {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let (key, _) = match hkcu.create_subkey("Software\\WinControlCenter") {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let val = match style {
+        BlurStyle::Mica => "mica",
+        BlurStyle::MicaAlt => "mica_alt",
+        BlurStyle::Acrylic => "acrylic",
+        BlurStyle::Blur => "blur",
+    };
+    let _ = key.set_value("BlurStyle", &val.to_string());
 }
