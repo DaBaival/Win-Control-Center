@@ -1,6 +1,6 @@
 [package]
 name = "win-control-center"
-version = "1.4.1"
+version = "1.5.0"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -53,6 +53,5 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 winreg = "0.52"
 window-vibrancy = "0.7.1"
 raw-window-handle = "0.6"
-
 
 

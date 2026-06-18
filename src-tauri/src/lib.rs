@@ -12,24 +12,47 @@ use tauri::{
     image::Image,
     menu::{CheckMenuItem, Menu, MenuItem, Submenu},
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
-    Manager, Theme, WebviewWindow,
+    Emitter, Manager, Theme, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
 #[cfg(target_os = "windows")]
 use window_vibrancy::{apply_acrylic, apply_blur, apply_mica};
 #[cfg(target_os = "windows")]
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{COLORREF, HWND};
 #[cfg(target_os = "windows")]
 use windows::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DWMSBT_TABBEDWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
+};
+#[cfg(target_os = "windows")]
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetWindowLongW, SetLayeredWindowAttributes, SetWindowLongW, GWL_EXSTYLE, LWA_ALPHA,
+    WS_EX_LAYERED,
 };
 use winreg::{enums::*, RegKey};
 
 #[cfg(not(target_os = "windows"))]
 fn apply_window_effect(_window: &WebviewWindow) {}
 
+#[cfg(not(target_os = "windows"))]
+fn set_window_alpha(_window: &WebviewWindow, _alpha: u8) -> Result<(), String> {
+    Ok(())
+}
+
 // Embed icons at compile time for true portability
 const ICON_WHITE_BYTES: &[u8] = include_bytes!("../icons/icon_white.png");
 const ICON_BLACK_BYTES: &[u8] = include_bytes!("../icons/icon_black.png");
+const TRAY_MENU_WIDTH: f64 = 192.0;
+const TRAY_MENU_COMPACT_EXPANDED_WIDTH: f64 = 390.0;
+const TRAY_MENU_DEVICE_EXPANDED_WIDTH: f64 = 460.0;
+const TRAY_MENU_HEIGHT: f64 = 286.0;
+const TRAY_MENU_EXPANDED_HEIGHT: f64 = 340.0;
+
+fn tray_menu_expanded_width(submenu: Option<&str>) -> f64 {
+    match submenu {
+        Some("playback") | Some("recording") => TRAY_MENU_DEVICE_EXPANDED_WIDTH,
+        Some(_) => TRAY_MENU_COMPACT_EXPANDED_WIDTH,
+        None => TRAY_MENU_WIDTH,
+    }
+}
 
 fn is_light_mode_registry() -> bool {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
@@ -71,6 +94,103 @@ pub struct AppState {
 
     last_tray_state: Mutex<Option<LastTrayState>>,
     tray: Mutex<Option<tauri::tray::TrayIcon>>,
+}
+
+#[derive(serde::Serialize)]
+struct TrayMenuDevice {
+    id: String,
+    name: String,
+    is_default: bool,
+}
+
+#[derive(serde::Serialize)]
+struct TrayMenuState {
+    playback_devices: Vec<TrayMenuDevice>,
+    recording_devices: Vec<TrayMenuDevice>,
+    autostart: bool,
+    blur_style: String,
+    controls: PanelVisibility,
+}
+
+#[derive(Clone, Copy, PartialEq, serde::Serialize)]
+struct PanelVisibility {
+    speaker: bool,
+    microphone: bool,
+    brightness: bool,
+    mouse_speed: bool,
+    volume_mixer: bool,
+}
+
+fn blur_style_key(style: BlurStyle) -> &'static str {
+    match style {
+        BlurStyle::Mica => "mica",
+        BlurStyle::MicaAlt => "mica_alt",
+        BlurStyle::Acrylic => "acrylic",
+        BlurStyle::Blur => "blur",
+    }
+}
+
+fn panel_visibility_value_name(key: &str) -> Option<&'static str> {
+    match key {
+        "speaker" => Some("ShowSpeaker"),
+        "microphone" => Some("ShowMicrophone"),
+        "brightness" => Some("ShowBrightness"),
+        "mouse_speed" => Some("ShowMouseSpeed"),
+        "volume_mixer" => Some("ShowVolumeMixer"),
+        _ => None,
+    }
+}
+
+fn read_panel_visibility() -> PanelVisibility {
+    let defaults = PanelVisibility {
+        speaker: true,
+        microphone: true,
+        brightness: true,
+        mouse_speed: true,
+        volume_mixer: true,
+    };
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let Ok(key) = hkcu.open_subkey("Software\\WinControlCenter") else {
+        return defaults;
+    };
+
+    let read_bool = |name: &str, default: bool| -> bool {
+        key.get_value::<u32, _>(name)
+            .map(|value| value != 0)
+            .unwrap_or(default)
+    };
+
+    PanelVisibility {
+        speaker: read_bool("ShowSpeaker", defaults.speaker),
+        microphone: read_bool("ShowMicrophone", defaults.microphone),
+        brightness: read_bool("ShowBrightness", defaults.brightness),
+        mouse_speed: read_bool("ShowMouseSpeed", defaults.mouse_speed),
+        volume_mixer: read_bool("ShowVolumeMixer", defaults.volume_mixer),
+    }
+}
+
+fn panel_visibility_enabled(visibility: PanelVisibility, key: &str) -> Option<bool> {
+    match key {
+        "speaker" => Some(visibility.speaker),
+        "microphone" => Some(visibility.microphone),
+        "brightness" => Some(visibility.brightness),
+        "mouse_speed" => Some(visibility.mouse_speed),
+        "volume_mixer" => Some(visibility.volume_mixer),
+        _ => None,
+    }
+}
+
+fn set_panel_visibility_value(key: &str, enabled: bool) -> Result<(), String> {
+    let value_name = panel_visibility_value_name(key)
+        .ok_or_else(|| format!("Unknown panel visibility key: {}", key))?;
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let (settings, _) = hkcu
+        .create_subkey("Software\\WinControlCenter")
+        .map_err(|e| e.to_string())?;
+    settings
+        .set_value(value_name, &(enabled as u32))
+        .map_err(|e| e.to_string())
 }
 
 // --- Async Setter Commands (Non-blocking) ---
@@ -152,6 +272,9 @@ fn reapply_effects(window: tauri::WebviewWindow) {
     #[cfg(target_os = "windows")]
     {
         println!("Manually re-applying effects with DWM Kick...");
+        let app_state = window.state::<AppState>();
+        let should_restore_alpha = app_state.is_visible.load(Ordering::SeqCst);
+        let _ = set_window_alpha(&window, 0);
 
         // 1. Force Resize (Kick DWM composition)
         let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
@@ -175,7 +298,39 @@ fn reapply_effects(window: tauri::WebviewWindow) {
 
         // 4. Clear Background (CRITICAL: Must happen after Mica Alt)
         let _ = window.set_background_color(Some(Color(0, 0, 0, 0)));
+        if should_restore_alpha {
+            std::thread::sleep(std::time::Duration::from_millis(35));
+            let _ = set_window_alpha(&window, 255);
+        }
     }
+}
+
+#[cfg(target_os = "windows")]
+fn window_hwnd(window: &WebviewWindow) -> Result<HWND, String> {
+    let handle = window.window_handle().map_err(|e| e.to_string())?;
+    let raw = handle.as_raw();
+
+    let hwnd_isize = match raw {
+        RawWindowHandle::Win32(h) => h.hwnd.get(),
+        _ => return Err("Not a Windows window".to_string()),
+    };
+
+    Ok(HWND(hwnd_isize))
+}
+
+#[cfg(target_os = "windows")]
+fn set_window_alpha(window: &WebviewWindow, alpha: u8) -> Result<(), String> {
+    let hwnd = window_hwnd(window)?;
+
+    unsafe {
+        let style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        let layered_style = style | WS_EX_LAYERED.0;
+        SetWindowLongW(hwnd, GWL_EXSTYLE, layered_style as i32);
+        SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha, LWA_ALPHA)
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -189,6 +344,8 @@ fn apply_window_effect(window: &WebviewWindow) {
         is_light, style
     );
 
+    let _ = window.set_background_color(Some(Color(0, 0, 0, 0)));
+
     // CRITICAL: Always reset DWM backdrop to NONE first to prevent stuck states
     let _ = reset_mica_custom(window);
 
@@ -201,32 +358,39 @@ fn apply_window_effect(window: &WebviewWindow) {
     std::thread::sleep(std::time::Duration::from_millis(20));
 
     let is_dark_mode = !is_light;
-    // Use fully transparent fallback to avoid black background artifacts in Acrylic/Blur
-    let fallback_color = if is_light {
-        (255, 255, 255, 0)
+    let acrylic_tint = if is_light {
+        (245, 245, 245, 72)
     } else {
-        (0, 0, 0, 0)
+        (28, 28, 28, 96)
+    };
+    let blur_tint = if is_light {
+        (255, 255, 255, 32)
+    } else {
+        (24, 24, 24, 72)
     };
 
     let res = match style {
         BlurStyle::Mica => apply_mica(window, Some(is_dark_mode)).map_err(|e| format!("{:?}", e)),
         BlurStyle::MicaAlt => apply_mica_alt_custom(window),
         BlurStyle::Acrylic => {
-            apply_acrylic(window, Some(fallback_color)).map_err(|e| format!("{:?}", e))
+            apply_acrylic(window, Some(acrylic_tint)).map_err(|e| format!("{:?}", e))
         }
-        BlurStyle::Blur => apply_blur(window, Some(fallback_color)).map_err(|e| format!("{:?}", e)),
+        BlurStyle::Blur => {
+            apply_blur(window, Some(blur_tint)).map_err(|e| format!("{:?}", e))
+        }
     };
 
     if let Err(e) = res {
-        println!("{:?} failed: {}. Fallback to Blur...", style, e);
-        if let Err(e2) = apply_blur(window, Some(fallback_color)) {
-            println!("Fallback Blur also failed: {:?}", e2);
+        println!("{:?} failed: {}. Fallback to Mica Alt...", style, e);
+        if let Err(e2) = apply_mica_alt_custom(window) {
+            println!("Fallback Mica Alt also failed: {:?}", e2);
         }
     } else {
         println!("{:?} applied successfully.", style);
     }
 
-    // Always clear background color at the end
+    // WebView2 transparency on Windows requires alpha 0. Non-zero alpha can be
+    // treated as an opaque layer and makes Acrylic/Blur look like solid white.
     let _ = window.set_background_color(Some(Color(0, 0, 0, 0)));
 }
 
@@ -244,9 +408,9 @@ fn reset_mica_custom(window: &WebviewWindow) -> Result<(), String> {
     let hwnd = HWND(hwnd_isize);
 
     unsafe {
-        // Reset to DWMSBT_AUTO (0) or DWMSBT_NONE (1).
-        // 0 resets to system default behavior which is safest for clearing overrides.
-        let val: u32 = 0;
+        // Reset to DWMSBT_NONE before applying the next effect. AUTO can leave
+        // stale black surfaces when switching between Mica, Acrylic and Blur.
+        let val: u32 = 1;
         DwmSetWindowAttribute(
             hwnd,
             DWMWA_SYSTEMBACKDROP_TYPE,
@@ -346,6 +510,176 @@ fn set_mouse_speed(val: u32) {
 }
 
 #[tauri::command]
+fn get_panel_visibility() -> PanelVisibility {
+    read_panel_visibility()
+}
+
+async fn get_audio_devices(
+    app: &tauri::AppHandle,
+) -> (Vec<audio::AudioDevice>, Vec<audio::AudioDevice>) {
+    let audio_state = app.state::<audio::AudioState>();
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let _ = audio_state
+        .tx
+        .send(audio::AudioRequest::GetPlaybackDevices(tx));
+    let playback = rx.await.ok().and_then(|r| r.ok()).unwrap_or_default();
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let _ = audio_state
+        .tx
+        .send(audio::AudioRequest::GetCaptureDevices(tx));
+    let recording = rx.await.ok().and_then(|r| r.ok()).unwrap_or_default();
+
+    (playback, recording)
+}
+
+#[tauri::command]
+async fn get_tray_menu_state(app: tauri::AppHandle) -> Result<TrayMenuState, String> {
+    let (playback, recording) = get_audio_devices(&app).await;
+    let app_state = app.state::<AppState>();
+    let current_style = *app_state.blur_style.lock().unwrap();
+
+    Ok(TrayMenuState {
+        playback_devices: playback
+            .into_iter()
+            .map(|d| TrayMenuDevice {
+                id: d.id,
+                name: d.name,
+                is_default: d.is_default,
+            })
+            .collect(),
+        recording_devices: recording
+            .into_iter()
+            .map(|d| TrayMenuDevice {
+                id: d.id,
+                name: d.name,
+                is_default: d.is_default,
+            })
+            .collect(),
+        autostart: get_autostart(),
+        blur_style: blur_style_key(current_style).to_string(),
+        controls: read_panel_visibility(),
+    })
+}
+
+#[tauri::command]
+async fn tray_menu_action(
+    app: tauri::AppHandle,
+    action: String,
+    value: Option<String>,
+) -> Result<(), String> {
+    match action.as_str() {
+        "quit" => {
+            app.exit(0);
+        }
+        "autostart" => {
+            let current = get_autostart();
+            set_autostart(!current)?;
+        }
+        "playback" => {
+            if let Some(device_id) = value {
+                let state = app.state::<audio::AudioState>();
+                let _ = state
+                    .tx
+                    .send(audio::AudioRequest::SetDefaultDevice(device_id));
+            }
+        }
+        "recording" => {
+            if let Some(device_id) = value {
+                let state = app.state::<audio::AudioState>();
+                let _ = state
+                    .tx
+                    .send(audio::AudioRequest::SetDefaultDevice(device_id));
+            }
+        }
+        "style" => {
+            let style_key = value.unwrap_or_else(|| "mica_alt".to_string());
+            let new_style = match style_key.as_str() {
+                "mica" => BlurStyle::Mica,
+                "mica_alt" => BlurStyle::MicaAlt,
+                "acrylic" => BlurStyle::Acrylic,
+                "blur" => BlurStyle::Blur,
+                _ => BlurStyle::MicaAlt,
+            };
+
+            {
+                let state = app.state::<AppState>();
+                *state.blur_style.lock().unwrap() = new_style;
+            }
+            set_saved_blur_style(new_style);
+
+            if let Some(window) = app.get_webview_window("main") {
+                reapply_effects(window);
+            }
+        }
+        "control" => {
+            if let Some(key) = value {
+                let current_visibility = read_panel_visibility();
+                let current = panel_visibility_enabled(current_visibility, &key)
+                    .ok_or_else(|| format!("Unknown panel visibility key: {}", key))?;
+                set_panel_visibility_value(&key, !current)?;
+                let next_visibility = read_panel_visibility();
+                let _ = app.emit("panel-visibility-changed", next_visibility);
+            }
+        }
+        _ => {}
+    }
+
+    if action != "control" {
+        if let Some(window) = app.get_webview_window("tray-menu") {
+            let _ = window.hide();
+        }
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+fn set_tray_menu_expanded(app: tauri::AppHandle, expanded: bool, submenu: Option<String>) {
+    if let Some(window) = app.get_webview_window("tray-menu") {
+        let scale_factor = window.scale_factor().unwrap_or(1.0);
+        let Ok(pos) = window.outer_position() else {
+            return;
+        };
+        let Ok(size) = window.outer_size() else {
+            return;
+        };
+
+        let width = if expanded {
+            tray_menu_expanded_width(submenu.as_deref())
+        } else {
+            TRAY_MENU_WIDTH
+        };
+        let height = if expanded {
+            TRAY_MENU_EXPANDED_HEIGHT
+        } else {
+            TRAY_MENU_HEIGHT
+        };
+        let new_height = (height * scale_factor).round() as i32;
+        let bottom = pos.y + size.height as i32;
+
+        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
+            width,
+            height,
+        }));
+        let _ = window.set_position(tauri::Position::Physical(
+            tauri::PhysicalPosition {
+                x: pos.x,
+                y: bottom - new_height,
+            },
+        ));
+    }
+}
+
+#[tauri::command]
+fn hide_tray_menu(app: tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("tray-menu") {
+        let _ = window.hide();
+    }
+}
+
+#[tauri::command]
 async fn resize_window(app: tauri::AppHandle, height: f64) {
     let state = app.state::<AppState>();
     let mut cache = state.height_cache.lock().unwrap();
@@ -353,26 +687,27 @@ async fn resize_window(app: tauri::AppHandle, height: f64) {
     *cache = height;
 
     if let Some(window) = app.get_webview_window("main") {
-        let is_visible = window.is_visible().unwrap_or(false);
+        let is_visible = state.is_visible.load(Ordering::SeqCst);
         if is_visible {
             // Only reposition if change is significant (> 2px) to avoid micro-jitters
             if (height - old_cache).abs() > 2.0 {
-                let _old_size = window.outer_size().unwrap_or_default();
+                let old_size = window.outer_size().unwrap_or_default();
                 let scale_factor = window.scale_factor().unwrap_or(1.0);
-                let _new_height_phys = (height * scale_factor) as i32;
-                let _pos = window.outer_position().unwrap_or_default();
+                let new_height_phys = (height * scale_factor) as i32;
+                let pos = window.outer_position().unwrap_or_default();
 
                 let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
                     width: 360.0,
                     height,
                 }));
 
-                // Adjust Y to keep bottom fixed
-                // let diff = new_height_phys - old_size.height as i32;
-                // let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
-                //     x: pos.x,
-                //     y: pos.y - diff,
-                // }));
+                let diff = new_height_phys - old_size.height as i32;
+                let _ = window.set_position(tauri::Position::Physical(
+                    tauri::PhysicalPosition {
+                        x: pos.x,
+                        y: pos.y - diff,
+                    },
+                ));
             } else {
                 // Near-zero change, just ensure size is synced without heavy movement
                 // let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
@@ -429,15 +764,6 @@ pub fn run() {
                 tray: Mutex::new(None),
             });
 
-            // Background tray menu updater loop
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                    update_tray_menu(&handle).await;
-                }
-            });
-
             // Setup tray
             let window = app.get_webview_window("main").unwrap();
 
@@ -447,13 +773,21 @@ pub fn run() {
 
             // CRITICAL: Explicitly clear background color to ensure transparency
             let _ = window.set_background_color(Some(Color(0, 0, 0, 0)));
+            let _ = set_window_alpha(&window, 0);
+            let _ = window.set_position(tauri::Position::Physical(
+                tauri::PhysicalPosition {
+                    x: -32000,
+                    y: -32000,
+                },
+            ));
+            let _ = window.show();
 
             #[cfg(target_os = "windows")]
             {
                 let w = window.clone();
                 tauri::async_runtime::spawn(async move {
-                    // Final Attempt: Direct Startup Mica Alt Custom
-                    // Using Mica Alt + Pure Transparent Background matches the "Visible: True" config
+                    // Keep the WebView warm offscreen so tray toggles never expose
+                    // WebView2's default white first frame.
 
                     // Initial apply
                     apply_window_effect(&w);
@@ -465,6 +799,24 @@ pub fn run() {
                     println!("VIBRANCY APPLIED: Mica Alt Custom + Clean");
                 });
             }
+
+            let tray_menu_window = WebviewWindowBuilder::new(
+                app,
+                "tray-menu",
+                WebviewUrl::App("/#menu".into()),
+            )
+            .title("")
+            .inner_size(TRAY_MENU_WIDTH, TRAY_MENU_HEIGHT)
+            .decorations(false)
+            .transparent(true)
+            .background_color(Color(0, 0, 0, 0))
+            .resizable(false)
+            .visible(false)
+            .always_on_top(true)
+            .shadow(false)
+            .skip_taskbar(true)
+            .build()?;
+            let _ = tray_menu_window.set_background_color(Some(Color(0, 0, 0, 0)));
 
             // Initial theme from registry (more reliable than window.theme() at start)
             let theme = if is_light_mode_registry() {
@@ -547,9 +899,54 @@ pub fn run() {
                     match event {
                         TrayIconEvent::Click {
                             button: MouseButton::Right,
+                            rect,
                             ..
                         } => {
-                            // Menu is updated in background loop
+                            let app = tray.app_handle();
+                            if let Some(menu_window) = app.get_webview_window("tray-menu") {
+                                let scale_factor = menu_window.scale_factor().unwrap_or(1.0);
+                                let (tx, ty) = match rect.position {
+                                    tauri::Position::Physical(p) => (p.x, p.y),
+                                    tauri::Position::Logical(l) => (
+                                        (l.x * scale_factor) as i32,
+                                        (l.y * scale_factor) as i32,
+                                    ),
+                                };
+                                let tw = match rect.size {
+                                    tauri::Size::Physical(s) => s.width,
+                                    tauri::Size::Logical(l) => (l.width * scale_factor) as u32,
+                                };
+
+                                let menu_width = (TRAY_MENU_WIDTH * scale_factor) as i32;
+                                let max_expanded_width =
+                                    (TRAY_MENU_DEVICE_EXPANDED_WIDTH * scale_factor) as i32;
+                                let height = (TRAY_MENU_HEIGHT * scale_factor) as i32;
+                                let mut x = tx + (tw as i32 / 2) - menu_width + 24;
+                                let y = ty - height - 10;
+
+                                if let Ok(Some(monitor)) = menu_window.current_monitor() {
+                                    let monitor_pos = monitor.position();
+                                    let monitor_size = monitor.size();
+                                    let min_x = monitor_pos.x + 8;
+                                    let max_x = monitor_pos.x + monitor_size.width as i32
+                                        - max_expanded_width
+                                        - 8;
+                                    x = x.clamp(min_x, max_x.max(min_x));
+                                }
+
+                                let _ = menu_window.set_size(tauri::Size::Logical(
+                                    tauri::LogicalSize {
+                                        width: TRAY_MENU_WIDTH,
+                                        height: TRAY_MENU_HEIGHT,
+                                    },
+                                ));
+                                let _ = menu_window.set_position(tauri::Position::Physical(
+                                    tauri::PhysicalPosition { x, y },
+                                ));
+                                let _ = menu_window.set_background_color(Some(Color(0, 0, 0, 0)));
+                                let _ = menu_window.show();
+                                let _ = menu_window.set_focus();
+                            }
                         }
                         TrayIconEvent::Click {
                             button: MouseButton::Left,
@@ -569,15 +966,22 @@ pub fn run() {
                                 .as_millis() as u64;
 
                             if let Some(window) = app.get_webview_window("main") {
-                                let is_physically_visible = window.is_visible().unwrap_or(false);
+                                let is_panel_visible = state.is_visible.load(Ordering::SeqCst);
 
-                                if is_physically_visible {
+                                if is_panel_visible {
                                     // Protect against double-click/spam-click hiding
                                     let last_show_time = state.last_show.load(Ordering::SeqCst);
                                     if now - last_show_time < 500 {
                                         return;
                                     }
-                                    let _ = window.hide();
+                                    let _ = set_window_alpha(&window, 0);
+                                    let _ = window.set_position(tauri::Position::Physical(
+                                        tauri::PhysicalPosition {
+                                            x: -32000,
+                                            y: -32000,
+                                        },
+                                    ));
+                                    state.is_visible.store(false, Ordering::SeqCst);
                                     state.last_blur.store(now, Ordering::SeqCst);
                                 } else {
                                     let last_blur_time = state.last_blur.load(Ordering::SeqCst);
@@ -585,6 +989,7 @@ pub fn run() {
                                         return;
                                     }
                                     state.last_show.store(now, Ordering::SeqCst);
+                                    let _ = set_window_alpha(&window, 0);
 
                                     // Use cached height for initial sizing and positioning
                                     let cached_height = *state.height_cache.lock().unwrap();
@@ -619,11 +1024,10 @@ pub fn run() {
                                         tauri::PhysicalPosition { x, y },
                                     ));
 
-                                    // Re-apply effect BEFORE showing to prevent white flash
-                                    apply_window_effect(&window);
-
-                                    let _ = window.show();
+                                    let _ = window.set_background_color(Some(Color(0, 0, 0, 0)));
+                                    state.is_visible.store(true, Ordering::SeqCst);
                                     let _ = window.set_focus();
+                                    let _ = set_window_alpha(&window, 255);
                                 }
                             }
                         }
@@ -642,6 +1046,9 @@ pub fn run() {
                 window.on_window_event(move |event| match event {
                     tauri::WindowEvent::Focused(false) => {
                         let state = app_handle.state::<AppState>();
+                        if !state.is_visible.load(Ordering::SeqCst) {
+                            return;
+                        }
                         let now = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
                             .unwrap()
@@ -653,7 +1060,14 @@ pub fn run() {
                         }
 
                         state.last_blur.store(now, Ordering::SeqCst);
-                        let _ = w.hide();
+                        let _ = set_window_alpha(&w, 0);
+                        let _ = w.set_position(tauri::Position::Physical(
+                            tauri::PhysicalPosition {
+                                x: -32000,
+                                y: -32000,
+                            },
+                        ));
+                        state.is_visible.store(false, Ordering::SeqCst);
                     }
                     tauri::WindowEvent::ThemeChanged(theme) => {
                         update_tray_icon_for_theme(&app_handle, *theme);
@@ -669,11 +1083,14 @@ pub fn run() {
                 });
             }
 
-            // Initial tray menu update
-            let h2 = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                update_tray_menu(&h2).await;
-            });
+            if let Some(window) = app.get_webview_window("tray-menu") {
+                let w = window.clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::Focused(false) = event {
+                        let _ = w.hide();
+                    }
+                });
+            }
 
             Ok(())
         })
@@ -691,26 +1108,19 @@ pub fn run() {
             set_brightness,
             get_mouse_speed,
             set_mouse_speed,
-            resize_window
+            get_panel_visibility,
+            resize_window,
+            get_tray_menu_state,
+            tray_menu_action,
+            set_tray_menu_expanded,
+            hide_tray_menu
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
 
 async fn update_tray_menu(app_handle: &tauri::AppHandle) {
-    let audio_state = app_handle.state::<audio::AudioState>();
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let _ = audio_state
-        .tx
-        .send(audio::AudioRequest::GetPlaybackDevices(tx));
-    let out_devs = rx.await.ok().and_then(|r| r.ok()).unwrap_or_default();
-
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let _ = audio_state
-        .tx
-        .send(audio::AudioRequest::GetCaptureDevices(tx));
-    let in_devs = rx.await.ok().and_then(|r| r.ok()).unwrap_or_default();
-
+    let (out_devs, in_devs) = get_audio_devices(app_handle).await;
     let is_auto = get_autostart();
     let app_state = app_handle.state::<AppState>();
     let current_style = *app_state.blur_style.lock().unwrap();
@@ -726,14 +1136,13 @@ async fn update_tray_menu(app_handle: &tauri::AppHandle) {
         let mut last = app_state.last_tray_state.lock().unwrap();
         if let Some(old) = &*last {
             if old == &new_state {
-                // Return if nothing changed to avoid closing the open context menu
                 return;
             }
         }
         *last = Some(new_state);
     }
 
-    let out_menu = Submenu::new(app_handle, "播放设备", true).unwrap();
+    let out_menu = Submenu::new(app_handle, "\u{64ad}\u{653e}\u{8bbe}\u{5907}", true).unwrap();
     for d in out_devs {
         let _ = out_menu.append(
             &CheckMenuItem::with_id(
@@ -748,7 +1157,7 @@ async fn update_tray_menu(app_handle: &tauri::AppHandle) {
         );
     }
 
-    let in_menu = Submenu::new(app_handle, "录音设备", true).unwrap();
+    let in_menu = Submenu::new(app_handle, "\u{5f55}\u{97f3}\u{8bbe}\u{5907}", true).unwrap();
     for d in in_devs {
         let _ = in_menu.append(
             &CheckMenuItem::with_id(
@@ -763,52 +1172,47 @@ async fn update_tray_menu(app_handle: &tauri::AppHandle) {
         );
     }
 
-    let style_menu = Submenu::new(app_handle, "模糊样式", true).unwrap();
-    let _ = style_menu.append(
-        &CheckMenuItem::with_id(
-            app_handle,
-            "style:mica",
-            "云母 (Mica)",
-            true,
-            current_style == BlurStyle::Mica,
-            None::<&str>,
-        )
-        .unwrap(),
-    );
-    let _ = style_menu.append(
-        &CheckMenuItem::with_id(
-            app_handle,
+    let style_menu = Submenu::new(app_handle, "\u{6a21}\u{7cca}\u{6837}\u{5f0f}", true).unwrap();
+    let style_items = [
+        ("style:mica", "\u{4e91}\u{6bcd} (Mica)", BlurStyle::Mica),
+        (
             "style:mica_alt",
-            "云母 Alt (Mica Alt)",
-            true,
-            current_style == BlurStyle::MicaAlt,
-            None::<&str>,
-        )
-        .unwrap(),
-    );
-    let _ = style_menu.append(
-        &CheckMenuItem::with_id(
-            app_handle,
+            "\u{4e91}\u{6bcd} Alt (Mica Alt)",
+            BlurStyle::MicaAlt,
+        ),
+        (
             "style:acrylic",
-            "亚克力 (Acrylic)",
-            true,
-            current_style == BlurStyle::Acrylic,
-            None::<&str>,
-        )
-        .unwrap(),
-    );
+            "\u{4e9a}\u{514b}\u{529b} (Acrylic)",
+            BlurStyle::Acrylic,
+        ),
+        ("style:blur", "\u{6a21}\u{7cca} (Blur)", BlurStyle::Blur),
+    ];
+    for (id, label, style) in style_items {
+        let _ = style_menu.append(
+            &CheckMenuItem::with_id(
+                app_handle,
+                id,
+                label,
+                true,
+                current_style == style,
+                None::<&str>,
+            )
+            .unwrap(),
+        );
+    }
 
     let auto_item = CheckMenuItem::with_id(
         app_handle,
         "autostart",
-        "开机自启",
+        "\u{5f00}\u{673a}\u{81ea}\u{542f}",
         true,
         is_auto,
         None::<&str>,
     )
     .unwrap();
 
-    let quit_item = MenuItem::with_id(app_handle, "quit", "退出", true, None::<&str>).unwrap();
+    let quit_item =
+        MenuItem::with_id(app_handle, "quit", "\u{9000}\u{51fa}", true, None::<&str>).unwrap();
 
     let menu = Menu::with_items(
         app_handle,

@@ -1,9 +1,14 @@
 <script>
   import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+  import { listen } from "@tauri-apps/api/event";
   import { onMount, tick } from "svelte";
   // import Slider from "$lib/components/Slider.svelte";
   // Temporarily NOT using AppRow component to keep things raw and verifiable
   // import AppRow from "$lib/components/AppRow.svelte";
+
+  /** @typedef {{ id: string, name: string, is_default: boolean }} TrayMenuDevice */
+  /** @typedef {{ speaker: boolean, microphone: boolean, brightness: boolean, mouse_speed: boolean, volume_mixer: boolean }} PanelVisibility */
+  /** @typedef {{ playback_devices: TrayMenuDevice[], recording_devices: TrayMenuDevice[], autostart: boolean, blur_style: string, controls: PanelVisibility }} TrayMenuState */
 
   let sysVol = 0;
   let sysMuted = false;
@@ -11,6 +16,44 @@
   let micMuted = false;
   let brightness = 100;
   let mouseSpeed = 10;
+  let isTrayMenu = false;
+  let activeSubmenu = "";
+  let trayMenuExpanded = false;
+
+  /** @type {PanelVisibility} */
+  let panelVisibility = {
+    speaker: true,
+    microphone: true,
+    brightness: true,
+    mouse_speed: true,
+    volume_mixer: true,
+  };
+
+  /** @type {Array<{ id: string, label: string }>} */
+  const styleOptions = [
+    { id: "mica", label: "云母 (Mica)" },
+    { id: "mica_alt", label: "云母 Alt (Mica Alt)" },
+    { id: "acrylic", label: "亚克力 (Acrylic)" },
+    { id: "blur", label: "模糊 (Blur)" },
+  ];
+
+  /** @type {Array<{ id: keyof PanelVisibility, label: string }>} */
+  const controlOptions = [
+    { id: "speaker", label: "扬声器" },
+    { id: "microphone", label: "麦克风" },
+    { id: "brightness", label: "屏幕亮度" },
+    { id: "mouse_speed", label: "鼠标灵敏度" },
+    { id: "volume_mixer", label: "音量合成器" },
+  ];
+
+  /** @type {TrayMenuState} */
+  let trayMenuState = {
+    playback_devices: [],
+    recording_devices: [],
+    autostart: false,
+    blur_style: "mica_alt",
+    controls: panelVisibility,
+  };
 
   /** @type {Array<{pid: number, name: string, volume: number, is_muted: boolean, volume_display: number, icon_path: string}>} */
   let apps = [];
@@ -21,6 +64,11 @@
   let isDragging = false;
   let initialLoaded = false;
   let pollingLock = false;
+  $: hasMergedControls =
+    panelVisibility.speaker ||
+    panelVisibility.microphone ||
+    panelVisibility.brightness ||
+    panelVisibility.mouse_speed;
 
   async function adjustHeight() {
     await tick();
@@ -42,22 +90,24 @@
   }
 
   /**
-   * @param {Function} func
+   * @template {(...args: any[]) => any} T
+   * @param {T} func
    * @param {number} wait
+   * @returns {T}
    */
   function debounce(func, wait) {
     /** @type {any} */
     let timeout;
-    return function (...args) {
+    return /** @type {T} */ ((...args) => {
       clearTimeout(timeout);
-      timeout = setTimeout(() => func.apply(this, args), wait);
-    };
+      timeout = setTimeout(() => func(...args), wait);
+    });
   }
 
   // --- IPC UPDATERS ---
 
   /** @param {number} val */
-  const updateSysVol = debounce(async (val) => {
+  const updateSysVol = debounce(async (/** @type {number} */ val) => {
     try {
       await invoke("set_system_volume", { vol: val / 100.0 });
     } catch (e) {
@@ -66,7 +116,7 @@
   }, 50);
 
   /** @param {number} val */
-  const updateMicVol = debounce(async (val) => {
+  const updateMicVol = debounce(async (/** @type {number} */ val) => {
     try {
       await invoke("set_mic_volume", { vol: val / 100.0 });
     } catch (e) {
@@ -75,7 +125,7 @@
   }, 50);
 
   /** @param {number} val */
-  const updateBrightness = debounce(async (val) => {
+  const updateBrightness = debounce(async (/** @type {number} */ val) => {
     try {
       await invoke("set_brightness", { val: val / 100.0 });
     } catch (e) {
@@ -84,7 +134,7 @@
   }, 50);
 
   /** @param {number} val */
-  const updateMouseSpeed = debounce(async (val) => {
+  const updateMouseSpeed = debounce(async (/** @type {number} */ val) => {
     try {
       await invoke("set_mouse_speed", { val: Math.round(val) });
     } catch (e) {
@@ -96,7 +146,10 @@
    * @param {number} pid
    * @param {number} vol
    */
-  const updateAppVol = debounce(async (pid, vol) => {
+  const updateAppVol = debounce(async (
+    /** @type {number} */ pid,
+    /** @type {number} */ vol,
+  ) => {
     try {
       await invoke("set_app_volume", { pid, vol: vol / 100.0 });
     } catch (e) {
@@ -239,7 +292,7 @@
       }
 
       if (resApps.status === "fulfilled") {
-        const newApps = resApps.value.map((a) => ({
+        const newApps = resApps.value.map((/** @type {any} */ a) => ({
           ...a,
           volume_display: Math.round(a.volume * 100),
         }));
@@ -260,11 +313,114 @@
     }
   }
 
+  async function loadTrayMenuState() {
+    try {
+      trayMenuState = /** @type {TrayMenuState} */ (
+        await invoke("get_tray_menu_state")
+      );
+    } catch (e) {
+      console.error("Tray Menu State Error:", e);
+    }
+  }
+
+  async function loadPanelVisibility() {
+    try {
+      panelVisibility = /** @type {PanelVisibility} */ (
+        await invoke("get_panel_visibility")
+      );
+      await adjustHeight();
+    } catch (e) {
+      console.error("Panel Visibility Error:", e);
+    }
+  }
+
+  /**
+   * @param {string} menu
+   */
+  function setActiveSubmenu(menu) {
+    if (activeSubmenu === menu) return;
+    activeSubmenu = menu;
+    const expanded = menu !== "";
+    trayMenuExpanded = expanded;
+    invoke("set_tray_menu_expanded", {
+      expanded,
+      submenu: expanded ? menu : null,
+    }).catch((e) => {
+      console.error("Tray Menu Layout Error:", e);
+    });
+  }
+
+  function resetTrayMenuLayout() {
+    if (!activeSubmenu && !trayMenuExpanded) return;
+    activeSubmenu = "";
+    trayMenuExpanded = false;
+    invoke("set_tray_menu_expanded", {
+      expanded: false,
+      submenu: null,
+    }).catch((e) => {
+      console.error("Tray Menu Layout Error:", e);
+    });
+  }
+
+  /**
+   * @param {string} action
+   * @param {string | undefined} value
+   */
+  async function runTrayMenuAction(action, value = undefined) {
+    try {
+      await invoke("tray_menu_action", { action, value: value ?? null });
+      if (action !== "quit") {
+        await loadTrayMenuState();
+        if (action === "control") {
+          panelVisibility = trayMenuState.controls;
+        }
+      }
+    } catch (e) {
+      console.error("Tray Menu Action Error:", e);
+    }
+  }
+
+  async function hideTrayMenu() {
+    try {
+      resetTrayMenuLayout();
+      await invoke("hide_tray_menu");
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
   onMount(() => {
+    isTrayMenu =
+      window.location.hash === "#menu" ||
+      new URLSearchParams(window.location.search).get("view") === "menu";
+
+    if (isTrayMenu) {
+      const handleTrayMenuFocus = () => {
+        resetTrayMenuLayout();
+        loadTrayMenuState();
+      };
+      handleTrayMenuFocus();
+      window.addEventListener("focus", handleTrayMenuFocus);
+
+      return () => {
+        window.removeEventListener("focus", handleTrayMenuFocus);
+      };
+    }
+
+    loadPanelVisibility();
     loadState();
     interval = setInterval(() => {
       loadState();
     }, 2500);
+
+    /** @type {undefined | (() => void)} */
+    let unlistenPanelVisibility;
+    listen("panel-visibility-changed", (event) => {
+      panelVisibility = /** @type {PanelVisibility} */ (event.payload);
+      adjustHeight();
+    }).then((unlisten) => {
+      unlistenPanelVisibility = unlisten;
+    });
 
     const handleGlobalUp = () => {
       if (isDragging) isDragging = false;
@@ -275,14 +431,162 @@
 
     return () => {
       if (interval) clearInterval(interval);
+      if (unlistenPanelVisibility) unlistenPanelVisibility();
       window.removeEventListener("pointerup", handleGlobalUp);
       window.removeEventListener("blur", handleGlobalUp);
     };
   });
 </script>
 
+{#if isTrayMenu}
+  <div
+    class="tray-menu-stage {activeSubmenu ? 'expanded' : ''} {activeSubmenu}"
+    role="presentation"
+    oncontextmenu={(e) => {
+      e.preventDefault();
+      hideTrayMenu();
+    }}
+    onmouseleave={() => {
+      setActiveSubmenu("");
+    }}
+  >
+    <nav class="context-menu" aria-label="Tray menu">
+      <button
+        class="menu-row {activeSubmenu === 'controls' ? 'active' : ''}"
+        onmouseenter={() => {
+          setActiveSubmenu("controls");
+        }}
+      >
+        <span class="menu-icon">
+          <svg viewBox="0 0 24 24"><path d="M4 7h10" /><path d="M18 7h2" /><path d="M16 5v4" /><path d="M4 17h2" /><path d="M10 17h10" /><path d="M8 15v4" /></svg>
+        </span>
+        <span class="menu-label">控制选项</span>
+        <span class="menu-chevron">›</span>
+      </button>
+
+      <button
+        class="menu-row {activeSubmenu === 'playback' ? 'active' : ''}"
+        onmouseenter={() => {
+          setActiveSubmenu("playback");
+        }}
+      >
+        <span class="menu-icon">
+          <svg viewBox="0 0 24 24"><path d="M11 5 6 9H3v6h3l5 4V5Z" /><path d="M15.5 8.5a5 5 0 0 1 0 7" /></svg>
+        </span>
+        <span class="menu-label">播放设备</span>
+        <span class="menu-chevron">›</span>
+      </button>
+
+      <button
+        class="menu-row {activeSubmenu === 'recording' ? 'active' : ''}"
+        onmouseenter={() => {
+          setActiveSubmenu("recording");
+        }}
+      >
+        <span class="menu-icon">
+          <svg viewBox="0 0 24 24"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z" /><path d="M19 11a7 7 0 0 1-14 0" /><path d="M12 18v3" /></svg>
+        </span>
+        <span class="menu-label">录音设备</span>
+        <span class="menu-chevron">›</span>
+      </button>
+
+      <button
+        class="menu-row {activeSubmenu === 'style' ? 'active' : ''}"
+        onmouseenter={() => {
+          setActiveSubmenu("style");
+        }}
+      >
+        <span class="menu-icon">
+          <svg viewBox="0 0 24 24"><path d="M4 8h16" /><path d="M8 4v16" /><path d="M16 4v16" /><path d="M4 16h16" /></svg>
+        </span>
+        <span class="menu-label">模糊样式</span>
+        <span class="menu-chevron">›</span>
+      </button>
+
+      <div class="menu-separator"></div>
+
+      <button
+        class="menu-row"
+        onmouseenter={() => {
+          setActiveSubmenu("");
+        }}
+        onclick={() => runTrayMenuAction("autostart")}
+      >
+        <span class="menu-check">{trayMenuState.autostart ? "✓" : ""}</span>
+        <span class="menu-label">开机自启</span>
+      </button>
+
+      <button
+        class="menu-row"
+        onmouseenter={() => {
+          setActiveSubmenu("");
+        }}
+        onclick={() => runTrayMenuAction("quit")}
+      >
+        <span class="menu-icon">
+          <svg viewBox="0 0 24 24"><path d="M12 3v9" /><path d="M6.4 6.4a8 8 0 1 0 11.2 0" /></svg>
+        </span>
+        <span class="menu-label">退出</span>
+      </button>
+    </nav>
+
+    {#if activeSubmenu}
+      <div class="context-submenu {activeSubmenu}">
+        {#if activeSubmenu === "controls"}
+          {#each controlOptions as control}
+            <button
+              class="menu-row"
+              onclick={() => runTrayMenuAction("control", control.id)}
+            >
+              <span class="menu-check">{trayMenuState.controls[control.id] ? "✓" : ""}</span>
+              <span class="menu-label">{control.label}</span>
+            </button>
+          {/each}
+        {:else if activeSubmenu === "playback"}
+          {#each trayMenuState.playback_devices as device}
+            <button
+              class="menu-row"
+              title={device.name}
+              onclick={() => runTrayMenuAction("playback", device.id)}
+            >
+              <span class="menu-check">{device.is_default ? "✓" : ""}</span>
+              <span class="menu-label">{device.name}</span>
+            </button>
+          {:else}
+            <div class="menu-empty">没有可用播放设备</div>
+          {/each}
+        {:else if activeSubmenu === "recording"}
+          {#each trayMenuState.recording_devices as device}
+            <button
+              class="menu-row"
+              title={device.name}
+              onclick={() => runTrayMenuAction("recording", device.id)}
+            >
+              <span class="menu-check">{device.is_default ? "✓" : ""}</span>
+              <span class="menu-label">{device.name}</span>
+            </button>
+          {:else}
+            <div class="menu-empty">没有可用录音设备</div>
+          {/each}
+        {:else if activeSubmenu === "style"}
+          {#each styleOptions as style}
+            <button
+              class="menu-row"
+              onclick={() => runTrayMenuAction("style", style.id)}
+            >
+              <span class="menu-check">{trayMenuState.blur_style === style.id ? "✓" : ""}</span>
+              <span class="menu-label">{style.label}</span>
+            </button>
+          {/each}
+        {/if}
+      </div>
+    {/if}
+  </div>
+{:else}
 <main>
+  {#if hasMergedControls}
   <section class="merged-controls">
+    {#if panelVisibility.speaker}
     <div class="control-row">
       <div
         class="icon-box {sysMuted ? 'muted' : ''}"
@@ -328,7 +632,9 @@
         <span class="value-badge">{Math.round(sysVol)}</span>
       </div>
     </div>
+    {/if}
 
+    {#if panelVisibility.microphone}
     <div class="control-row">
       <div
         class="icon-box {micMuted ? 'muted' : ''}"
@@ -372,7 +678,9 @@
         <span class="value-badge">{Math.round(micVol)}</span>
       </div>
     </div>
+    {/if}
 
+    {#if panelVisibility.brightness}
     <div class="control-row">
       <div class="icon-box" title="Brightness">
         <svg
@@ -407,7 +715,9 @@
         <span class="value-badge">{Math.round(brightness)}</span>
       </div>
     </div>
+    {/if}
 
+    {#if panelVisibility.mouse_speed}
     <div class="control-row">
       <div class="icon-box" title="Mouse Speed">
         <svg
@@ -438,8 +748,11 @@
         <span class="value-badge">{mouseSpeed}</span>
       </div>
     </div>
+    {/if}
   </section>
+  {/if}
 
+  {#if panelVisibility.volume_mixer}
   <section class="app-section">
     <div class="app-list">
       {#each apps as app (app.pid + app.name)}
@@ -512,7 +825,9 @@
       {/each}
     </div>
   </section>
+  {/if}
 </main>
+{/if}
 
 <style>
   :global(html),
@@ -550,6 +865,183 @@
     border-radius: 12px !important;
     border: 1px solid rgba(255, 255, 255, 0.4);
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  }
+
+  .tray-menu-stage {
+    box-sizing: border-box;
+    width: 192px;
+    height: 286px;
+    position: relative;
+    padding: 0;
+    background: transparent;
+    font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  }
+
+  .tray-menu-stage.expanded {
+    width: 390px;
+    height: 340px;
+  }
+
+  .tray-menu-stage.playback,
+  .tray-menu-stage.recording {
+    width: 460px;
+  }
+
+  .context-menu,
+  .context-submenu {
+    width: 176px;
+    max-height: 322px;
+    box-sizing: border-box;
+    padding: 6px;
+    border-radius: 8px;
+    border: 1px solid rgba(0, 0, 0, 0.07);
+    background: rgba(248, 248, 248, 0.9);
+    box-shadow:
+      0 8px 22px rgba(0, 0, 0, 0.12),
+      0 1px 4px rgba(0, 0, 0, 0.1);
+    backdrop-filter: blur(26px) saturate(1.35);
+    overflow: hidden;
+  }
+
+  .context-menu {
+    position: absolute;
+    left: 8px;
+    bottom: 8px;
+  }
+
+  .context-submenu {
+    position: absolute;
+    left: 192px;
+    bottom: 8px;
+    width: 190px;
+    overflow-y: auto;
+  }
+
+  .context-submenu.playback,
+  .context-submenu.recording {
+    width: 260px;
+  }
+
+  .context-submenu::-webkit-scrollbar {
+    width: 8px;
+  }
+
+  .context-submenu::-webkit-scrollbar-thumb {
+    background: rgba(0, 0, 0, 0.18);
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+
+  .menu-row {
+    width: 100%;
+    height: 40px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: #1f1f1f;
+    display: grid;
+    grid-template-columns: 28px minmax(0, 1fr) 14px;
+    align-items: center;
+    gap: 5px;
+    padding: 0 7px;
+    font: inherit;
+    font-size: 14px;
+    text-align: left;
+    cursor: default;
+  }
+
+  .menu-row:hover,
+  .menu-row.active {
+    background: rgba(0, 0, 0, 0.06);
+  }
+
+  .menu-icon,
+  .menu-check {
+    width: 24px;
+    height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: #202020;
+    font-size: 15px;
+  }
+
+  .menu-icon svg {
+    width: 21px;
+    height: 21px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .menu-label {
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .menu-chevron {
+    justify-self: end;
+    color: #484848;
+    font-size: 22px;
+    line-height: 1;
+    transform: translateY(-1px);
+  }
+
+  .menu-separator {
+    height: 1px;
+    margin: 5px -6px;
+    background: rgba(0, 0, 0, 0.08);
+  }
+
+  .menu-empty {
+    padding: 13px 14px;
+    color: #6b6b6b;
+    font-size: 14px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .context-menu,
+    .context-submenu {
+      border-color: rgba(255, 255, 255, 0.08);
+      background: rgba(38, 38, 38, 0.92);
+      box-shadow:
+        0 10px 24px rgba(0, 0, 0, 0.32),
+        0 1px 4px rgba(0, 0, 0, 0.28);
+    }
+
+    .menu-row {
+      color: #f2f2f2;
+    }
+
+    .menu-row:hover,
+    .menu-row.active {
+      background: rgba(255, 255, 255, 0.09);
+    }
+
+    .menu-icon,
+    .menu-check,
+    .menu-chevron {
+      color: #f2f2f2;
+    }
+
+    .menu-separator {
+      background: rgba(255, 255, 255, 0.08);
+    }
+
+    .menu-empty {
+      color: #b8b8b8;
+    }
+
+    .context-submenu::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.24);
+      border: 2px solid transparent;
+      background-clip: content-box;
+    }
   }
 
   @media (prefers-color-scheme: dark) {
